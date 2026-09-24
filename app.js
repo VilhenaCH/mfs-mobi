@@ -716,40 +716,129 @@ function processFile(file) {
   reader.readAsText(file,"utf-8");
 }
 
+
+const SAFE_BATCH_SIZE = 5;
+
+/*
+  Firestore Security Rules do MFS consultam o perfil do usuário e,
+  na criação de registros mensais, também verificam a existência da escola.
+  Para não ultrapassar os limites de access calls das Rules, as gravações
+  em massa são divididas em lotes pequenos.
+*/
+async function commitWriteOperationsInChunks(operations, chunkSize = SAFE_BATCH_SIZE) {
+  for (let index = 0; index < operations.length; index += chunkSize) {
+    const batch = writeBatch(db);
+    operations.slice(index, index + chunkSize).forEach(operation => operation(batch));
+    await batch.commit();
+  }
+}
+
 async function applyImport() {
   if (!state.preview || !isAdmin()) return;
+
   const parsed = state.preview;
+  const schoolEntries = Object.entries(parsed.schoolsMeta);
+  const recordEntries = Object.entries(parsed.records);
+
   try {
-    const batch = writeBatch(db);
-    Object.entries(parsed.schoolsMeta).forEach(([id, meta]) => {
-      batch.set(doc(db,"schools",id), { ...meta, active:true, updatedAt:serverTimestamp(), updatedBy:state.user.uid }, { merge:true });
+    /*
+      ETAPA 1
+      Primeiro as escolas precisam existir no Firestore.
+
+      A regra de months/{month}/schools/{schoolId} exige a existência de
+      schools/{schoolId}. Por isso não podemos criar escola e registro mensal
+      no mesmo batch durante a primeira importação.
+    */
+    const schoolOperations = schoolEntries.map(([id, meta]) => batch => {
+      batch.set(
+        doc(db, "schools", id),
+        {
+          ...meta,
+          active: true,
+          updatedAt: serverTimestamp(),
+          updatedBy: state.user.uid
+        },
+        { merge: true }
+      );
     });
-    Object.entries(parsed.records).forEach(([id, record]) => {
-      batch.set(doc(db,"months",parsed.month,"schools",id), {
-        schoolId:id,
-        month:parsed.month,
-        s:record.s || {},
-        r:record.r || {},
-        n:record.n || {},
-        source:"monitora",
-        sourceFile:parsed.fileName,
-        updatedAt:serverTimestamp(),
-        updatedBy:state.user.uid
-      });
+
+    await commitWriteOperationsInChunks(schoolOperations);
+
+    /*
+      ETAPA 2
+      Agora que as escolas existem, gravamos os registros mensais.
+
+      Mantemos os lotes pequenos para respeitar os limites de get/exists
+      avaliados pelas Firestore Security Rules.
+    */
+    const recordOperations = recordEntries.map(([id, record]) => batch => {
+      batch.set(
+        doc(db, "months", parsed.month, "schools", id),
+        {
+          schoolId: id,
+          month: parsed.month,
+          s: record.s || {},
+          r: record.r || {},
+          n: record.n || {},
+          source: "monitora",
+          sourceFile: parsed.fileName,
+          updatedAt: serverTimestamp(),
+          updatedBy: state.user.uid
+        }
+      );
     });
-    batch.set(doc(db,"months",parsed.month), { label:monthLabel(parsed.month), lastMonitoraFile:parsed.fileName, lastSource:"monitora", updatedAt:serverTimestamp(), updatedBy:state.user.uid }, { merge:true });
-    const importRef = doc(collection(db,"imports"));
+
+    await commitWriteOperationsInChunks(recordOperations);
+
+    /*
+      ETAPA 3
+      Metadados do mês e auditoria da importação.
+    */
+    const finalBatch = writeBatch(db);
+
+    finalBatch.set(
+      doc(db, "months", parsed.month),
+      {
+        label: monthLabel(parsed.month),
+        lastMonitoraFile: parsed.fileName,
+        lastSource: "monitora",
+        updatedAt: serverTimestamp(),
+        updatedBy: state.user.uid
+      },
+      { merge: true }
+    );
+
     const counts = importCounts(parsed.records);
-    batch.set(importRef, { type:"monitora", month:parsed.month, fileName:parsed.fileName, schoolCount:Object.keys(parsed.records).length, summary:{sent:counts.G||0,pending:counts.R||0,justified:counts.J||0}, createdAt:serverTimestamp(), createdBy:state.user.uid, createdByEmail:state.user.email || "" });
-    await batch.commit();
+    const importRef = doc(collection(db, "imports"));
+
+    finalBatch.set(importRef, {
+      type: "monitora",
+      month: parsed.month,
+      fileName: parsed.fileName,
+      schoolCount: recordEntries.length,
+      summary: {
+        sent: counts.G || 0,
+        pending: counts.R || 0,
+        justified: counts.J || 0
+      },
+      createdAt: serverTimestamp(),
+      createdBy: state.user.uid,
+      createdByEmail: state.user.email || ""
+    });
+
+    await finalBatch.commit();
+
     state.month = parsed.month;
     subscribeMonthRecords(state.month);
     clearImport(false);
     switchView("monitor");
-    showToast(`${Object.keys(parsed.records).length} escolas sincronizadas com o Firestore.`);
+
+    showToast(`${recordEntries.length} escolas sincronizadas com o Firestore.`);
   } catch (error) {
-    console.error(error);
-    showToast("A importação não pôde ser gravada. Verifique suas permissões.");
+    console.error("Erro ao importar HTML do Monitora:", error);
+
+    const code = error?.code ? ` (${error.code})` : "";
+    showToast(`A importação não pôde ser gravada${code}. Confira o Console do navegador.`);
   }
 }
 
@@ -849,30 +938,131 @@ function processDailyFile(file) {
 
 async function applyDailyCSV() {
   if (!state.dailyPreview) return;
-  const parsed=state.dailyPreview;
-  if ($("#dailyDate").value!==parsed.date || $("#dailyShift").value!==parsed.shift) { showToast("A data ou turno mudou. Selecione novamente o CSV."); return; }
+
+  const parsed = state.dailyPreview;
+
+  if ($("#dailyDate").value !== parsed.date || $("#dailyShift").value !== parsed.shift) {
+    showToast("A data ou turno mudou. Selecione novamente o CSV.");
+    return;
+  }
+
   try {
-    const day=Number(parsed.date.slice(-2));
-    const batch=writeBatch(db);
-    const appliedRows=[];
-    parsed.rows.forEach(row=>{
-      if (!row.id || row.frequency==="desconhecida") return;
-      const current=clone(parsed.existingRecords[row.id] || {s:{}});
-      setStatusChar(current,parsed.shift,day,row.frequency==="enviada"?"G":"R",parsed.month);
-      batch.set(doc(db,"months",parsed.month,"schools",row.id), { schoolId:row.id, month:parsed.month, s:{[parsed.shift]:current.s[parsed.shift]}, source:"csv", updatedAt:serverTimestamp(), updatedBy:state.user.uid }, {merge:true});
+    const day = Number(parsed.date.slice(-2));
+    const appliedRows = [];
+    const recordOperations = [];
+
+    parsed.rows.forEach(row => {
+      if (!row.id || row.frequency === "desconhecida") return;
+
+      const current = clone(parsed.existingRecords[row.id] || { s: {} });
+
+      setStatusChar(
+        current,
+        parsed.shift,
+        day,
+        row.frequency === "enviada" ? "G" : "R",
+        parsed.month
+      );
+
+      recordOperations.push(batch => {
+        batch.set(
+          doc(db, "months", parsed.month, "schools", row.id),
+          {
+            schoolId: row.id,
+            month: parsed.month,
+            s: { [parsed.shift]: current.s[parsed.shift] },
+            source: "csv",
+            updatedAt: serverTimestamp(),
+            updatedBy: state.user.uid
+          },
+          { merge: true }
+        );
+      });
+
       appliedRows.push(row);
     });
-    batch.set(doc(db,"months",parsed.month), { label:monthLabel(parsed.month), lastDailyFile:parsed.fileName, lastSource:"csv", updatedAt:serverTimestamp(), updatedBy:state.user.uid }, {merge:true});
-    batch.set(doc(db,"dailyRuns",`${parsed.date}_${parsed.shift}`), { date:parsed.date, month:parsed.month, shift:parsed.shift, fileName:parsed.fileName, schoolIds:appliedRows.map(r=>r.id), importedAt:serverTimestamp(), importedBy:state.user.uid, importedByEmail:state.user.email||"", summary:{total:appliedRows.length,sent:appliedRows.filter(r=>r.frequency==="enviada").length,pending:appliedRows.filter(r=>r.frequency==="nao_enviada").length} }, {merge:true});
-    batch.set(doc(collection(db,"imports")), { type:"csv", date:parsed.date, month:parsed.month, shift:parsed.shift, fileName:parsed.fileName, schoolCount:appliedRows.length, summary:{sent:appliedRows.filter(r=>r.frequency==="enviada").length,pending:appliedRows.filter(r=>r.frequency==="nao_enviada").length}, createdAt:serverTimestamp(), createdBy:state.user.uid, createdByEmail:state.user.email||"" });
-    await batch.commit();
-    state.month=parsed.month;
+
+    if (!appliedRows.length) {
+      showToast("Nenhum registro válido foi encontrado para aplicar.");
+      return;
+    }
+
+    /*
+      Os registros são enviados em lotes pequenos para que as Security Rules
+      possam validar as escolas sem ultrapassar o limite de access calls.
+    */
+    await commitWriteOperationsInChunks(recordOperations);
+
+    /*
+      Depois dos registros, gravamos o resumo do mês, a execução diária
+      e o histórico da importação.
+    */
+    const finalBatch = writeBatch(db);
+
+    finalBatch.set(
+      doc(db, "months", parsed.month),
+      {
+        label: monthLabel(parsed.month),
+        lastDailyFile: parsed.fileName,
+        lastSource: "csv",
+        updatedAt: serverTimestamp(),
+        updatedBy: state.user.uid
+      },
+      { merge: true }
+    );
+
+    finalBatch.set(
+      doc(db, "dailyRuns", `${parsed.date}_${parsed.shift}`),
+      {
+        date: parsed.date,
+        month: parsed.month,
+        shift: parsed.shift,
+        fileName: parsed.fileName,
+        schoolIds: appliedRows.map(row => row.id),
+        importedAt: serverTimestamp(),
+        importedBy: state.user.uid,
+        importedByEmail: state.user.email || "",
+        summary: {
+          total: appliedRows.length,
+          sent: appliedRows.filter(row => row.frequency === "enviada").length,
+          pending: appliedRows.filter(row => row.frequency === "nao_enviada").length
+        }
+      },
+      { merge: true }
+    );
+
+    finalBatch.set(
+      doc(collection(db, "imports")),
+      {
+        type: "csv",
+        date: parsed.date,
+        month: parsed.month,
+        shift: parsed.shift,
+        fileName: parsed.fileName,
+        schoolCount: appliedRows.length,
+        summary: {
+          sent: appliedRows.filter(row => row.frequency === "enviada").length,
+          pending: appliedRows.filter(row => row.frequency === "nao_enviada").length
+        },
+        createdAt: serverTimestamp(),
+        createdBy: state.user.uid,
+        createdByEmail: state.user.email || ""
+      }
+    );
+
+    await finalBatch.commit();
+
+    state.month = parsed.month;
     subscribeMonthRecords(state.month);
     clearDaily(false);
     await renderCharges(parsed.date);
+
     showToast(`${appliedRows.length} registros gravados no Firestore.`);
-  } catch(error) {
-    console.error(error); showToast("Não foi possível aplicar o CSV no Firestore.");
+  } catch (error) {
+    console.error("Erro ao aplicar CSV diário:", error);
+
+    const code = error?.code ? ` (${error.code})` : "";
+    showToast(`Não foi possível aplicar o CSV no Firestore${code}. Confira o Console.`);
   }
 }
 
