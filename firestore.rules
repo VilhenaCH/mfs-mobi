@@ -1,0 +1,108 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function userRef() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function activeUser() {
+      return signedIn()
+        && exists(userRef())
+        && get(userRef()).data.active == true;
+    }
+
+    function admin() {
+      return activeUser() && get(userRef()).data.role == 'admin';
+    }
+
+    function ownsAccessRequest(uid) {
+      return signedIn()
+        && request.auth.uid == uid
+        && request.resource.data.uid == uid
+        && request.resource.data.email == request.auth.token.email;
+    }
+
+    match /users/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || admin());
+      allow list: if admin();
+      allow create, update, delete: if admin();
+    }
+
+    match /accessRequests/{uid} {
+      allow get: if signedIn() && (request.auth.uid == uid || admin());
+      allow list: if admin();
+
+      allow create: if ownsAccessRequest(uid)
+        && request.resource.data.keys().hasOnly([
+          'uid', 'email', 'displayName', 'photoURL', 'requestedAt'
+        ]);
+
+      allow update: if ownsAccessRequest(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'displayName', 'photoURL', 'requestedAt'
+        ]);
+
+      allow delete: if admin();
+    }
+
+    match /schools/{schoolId} {
+      allow read: if activeUser();
+      allow create, update, delete: if admin();
+    }
+
+    match /months/{monthId} {
+      allow read: if activeUser();
+      allow create, update: if activeUser()
+        && request.resource.data.updatedBy == request.auth.uid;
+      allow delete: if admin();
+
+      match /schools/{schoolId} {
+        allow read: if activeUser();
+
+        allow create: if activeUser()
+          && exists(/databases/$(database)/documents/schools/$(schoolId))
+          && request.resource.data.schoolId == schoolId
+          && request.resource.data.month == monthId
+          && request.resource.data.updatedBy == request.auth.uid;
+
+        allow update: if activeUser()
+          && resource.data.schoolId == schoolId
+          && resource.data.month == monthId
+          && request.resource.data.schoolId == schoolId
+          && request.resource.data.month == monthId
+          && request.resource.data.updatedBy == request.auth.uid;
+
+        allow delete: if admin();
+      }
+    }
+
+    match /dailyRuns/{runId} {
+      allow read: if activeUser();
+      allow create, update: if activeUser()
+        && request.resource.data.importedBy == request.auth.uid;
+      allow delete: if admin();
+    }
+
+    match /imports/{importId} {
+      allow read: if activeUser();
+      allow create: if activeUser()
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if admin();
+    }
+
+    match /auditLogs/{logId} {
+      allow read: if activeUser();
+      allow create: if activeUser()
+        && request.resource.data.createdBy == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
