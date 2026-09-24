@@ -40,7 +40,8 @@ const state = {
   status: "TODOS",
   preview: null,
   dailyPreview: null,
-  chargeGroups: []
+  chargeGroups: [],
+  editor: null
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -146,10 +147,10 @@ function renderSummary(bundle) {
   const schoolCount = Object.keys(bundle.records).length;
   const latest = latestDataDay(bundle.records, bundle.month);
   $("#summaryGrid").innerHTML = `
-    <article class="card summary-card school-card-kpi"><span class="label">Escolas</span><strong class="value">${schoolCount}</strong><div class="note">presentes neste mês</div></article>
-    <article class="card summary-card sent-card"><span class="label">Com frequência</span><strong class="value">${counts.G || 0}</strong><div class="note">registros escola × dia × turno</div></article>
-    <article class="card summary-card pending-card"><span class="label">Pendentes</span><strong class="value">${counts.R || 0}</strong><div class="note">marcados em vermelho no Monitora</div></article>
-    <article class="card summary-card justified-card"><span class="label">Justificadas</span><strong class="value">${counts.J || 0}</strong><div class="note">${latest ? `dados com situação até o dia ${String(latest).padStart(2,"0")}` : "sem situação registrada"}</div></article>`;
+    <article class="card summary-card school-card-kpi clickable" data-summary-filter="TODOS"><span class="label">Escolas</span><strong class="value">${schoolCount}</strong><div class="note">presentes neste mês</div></article>
+    <article class="card summary-card sent-card clickable" data-summary-filter="enviada"><span class="label">Com frequência</span><strong class="value">${counts.G || 0}</strong><div class="note">clique para filtrar</div></article>
+    <article class="card summary-card pending-card clickable" data-summary-filter="pendente"><span class="label">Pendentes</span><strong class="value">${counts.R || 0}</strong><div class="note">clique para filtrar</div></article>
+    <article class="card summary-card justified-card clickable" data-summary-filter="justificada"><span class="label">Justificadas</span><strong class="value">${counts.J || 0}</strong><div class="note">${latest ? `situação até o dia ${String(latest).padStart(2,"0")}` : "sem situação registrada"}</div></article>`;
 }
 
 function schoolMatches(meta, record) {
@@ -176,10 +177,38 @@ function perSchoolCounts(record, shifts) {
   return out;
 }
 
+function weekdayShort(month, day) {
+  const [year, mo] = month.split("-").map(Number);
+  return ["DOM","SEG","TER","QUA","QUI","SEX","SAB"][new Date(year, mo - 1, day).getDay()];
+}
+
+function shiftCode(shift) {
+  return ({ manha: "M", tarde: "T", noite: "N", integral: "I" })[shift] || "?";
+}
+
+function renderCalendarHalf(id, record, shifts, month, startDay, endDay) {
+  const cols = endDay - startDay + 1;
+  const headers = [];
+  const days = [];
+  for (let day = startDay; day <= endDay; day++) {
+    headers.push(`<div class="calendar-day-head"><span>${weekdayShort(month, day)}</span><strong>${String(day).padStart(2,"0")}</strong></div>`);
+    const chips = shifts.map(shift => {
+      const ch = statusChar(record, shift, day);
+      const info = STATUS_INFO[ch] || STATUS_INFO["?"];
+      const reason = record?.r?.[String(day)]?.[shift] || (ch === "X" ? record?.n?.[String(day)] : "") || "";
+      const title = `${String(day).padStart(2,"0")}/${month.slice(5,7)}/${month.slice(0,4)} · ${SHIFT_LABELS[shift]} · ${info.label}${reason ? ` · ${reason}` : ""}`;
+      return `<button class="status-chip ${info.cls}${reason ? " has-reason" : ""}" type="button" data-edit-status="1" data-school-id="${escapeHtml(id)}" data-day="${day}" data-shift="${shift}" title="${escapeHtml(title)}">${shiftCode(shift)}</button>`;
+    }).join("");
+    days.push(`<div class="calendar-day">${chips}</div>`);
+  }
+  return `<div class="calendar-half"><div class="calendar-body"><div class="calendar-header" style="--cols:${cols}">${headers.join("")}</div><div class="calendar-grid" style="--cols:${cols}">${days.join("")}</div></div></div>`;
+}
+
 function renderSchoolCard(id, meta, record, month) {
   const shifts = state.shift === "TODOS" ? recordShifts(record) : [state.shift].filter(s => record?.s?.[s]);
   const counts = perSchoolCounts(record, shifts);
   const ndays = daysInMonth(month);
+  const nonSchool = Object.entries(record?.n || {}).map(([day, reason]) => `${day}: ${reason}`).join(" · ");
   return `
     <article class="card school-card">
       <header class="school-head">
@@ -197,38 +226,84 @@ function renderSchoolCard(id, meta, record, month) {
           <div class="school-count"><strong>${counts.J}</strong><small>just.</small></div>
         </div>
       </header>
-      ${shifts.length ? shifts.map(shift => renderShiftRow(record, shift, month, ndays)).join("") : `<div class="empty-card">Sem turnos registrados neste mês.</div>`}
+      <div class="school-calendar">
+        ${shifts.length ? renderCalendarHalf(id, record, shifts, month, 1, Math.min(15, ndays)) + (ndays > 15 ? renderCalendarHalf(id, record, shifts, month, 16, ndays) : "") : `<div class="empty-card">Sem turnos registrados neste mês.</div>`}
+      </div>
+      <div class="school-footer">
+        <span class="hint">Clique em M, T, N ou I para editar</span>
+        <span class="non-school-note" title="${escapeHtml(nonSchool)}">${nonSchool ? `Ocorrências: ${escapeHtml(nonSchool)}` : "Sem ocorrências cadastradas"}</span>
+      </div>
     </article>`;
 }
 
-function renderShiftRow(record, shift, month, ndays) {
-  const cells = [];
-  for (let day = 1; day <= ndays; day++) {
-    const ch = statusChar(record, shift, day);
-    const info = STATUS_INFO[ch] || STATUS_INFO["?"];
-    const reason = record?.r?.[String(day)]?.[shift] || (ch === "X" ? record?.n?.[String(day)] : "") || "";
-    const date = `${String(day).padStart(2,"0")}/${month.slice(5,7)}/${month.slice(0,4)}`;
-    const title = `${date} · ${SHIFT_LABELS[shift]} · ${info.label}${reason ? ` · ${reason}` : ""}`;
-    cells.push(`<div class="day-cell ${info.cls}" title="${escapeHtml(title)}"><b>${day}</b><small>${info.short}</small></div>`);
-  }
-  return `<div class="shift-row"><div class="shift-name">${SHIFT_LABELS[shift]}</div><div class="days-scroll"><div class="days-grid" style="--days:${ndays}">${cells.join("")}</div></div></div>`;
+function openStatusEditor(schoolId, day, shift) {
+  const bundle = currentBundle();
+  const record = bundle.records[schoolId];
+  if (!record) return;
+  const meta = bundle.schools[schoolId] || {};
+  const ch = statusChar(record, shift, day);
+  const reason = record?.r?.[String(day)]?.[shift] || (ch === "X" ? record?.n?.[String(day)] : "") || "";
+  state.editor = { schoolId, day: Number(day), shift, month: state.month };
+  $("#editorSchool").textContent = meta.name || schoolId;
+  $("#editorDate").textContent = `${String(day).padStart(2,"0")}/${state.month.slice(5,7)}/${state.month.slice(0,4)}`;
+  $("#editorShift").textContent = SHIFT_LABELS[shift] || shift;
+  $("#editorStatus").value = ["G","R","J","X","."].includes(ch) ? ch : ".";
+  $("#editorReason").value = reason;
+  updateEditorHint();
+  const modal = $("#statusModal");
+  modal.classList.add("open");
+  modal.setAttribute("aria-hidden", "false");
+  setTimeout(() => $("#editorStatus")?.focus(), 60);
 }
 
-function renderMonitor() {
-  renderMonthSelect();
-  const bundle = currentBundle();
-  renderSummary(bundle);
-  $("#monthTitle").textContent = monthLabel(bundle.month);
-  const importedText = bundle.importedAt ? ` · Monitora atualizado em ${new Date(bundle.importedAt).toLocaleString("pt-BR")}` : "";
-  const dailyText = bundle.dailyImportedAt ? ` · CSV diário atualizado em ${new Date(bundle.dailyImportedAt).toLocaleString("pt-BR")}` : "";
-  $("#sourceInfo").textContent = bundle.source ? `Base: ${bundle.source}${importedText}${dailyText}` : `${importedText}${dailyText}`.replace(/^ · /, "");
+function closeStatusEditor() {
+  state.editor = null;
+  const modal = $("#statusModal");
+  modal.classList.remove("open");
+  modal.setAttribute("aria-hidden", "true");
+}
 
-  const ids = Object.keys(bundle.records).filter(id => schoolMatches(bundle.schools[id] || {}, bundle.records[id]));
-  ids.sort((a,b) => (bundle.schools[a]?.name || a).localeCompare(bundle.schools[b]?.name || b, "pt-BR"));
-  $("#resultMeta").textContent = `${ids.length} escola${ids.length === 1 ? "" : "s"} no filtro`;
-  $("#schoolList").innerHTML = ids.length
-    ? ids.map(id => renderSchoolCard(id, bundle.schools[id] || {}, bundle.records[id], bundle.month)).join("")
-    : `<div class="card empty-card">Nenhuma escola encontrada para os filtros atuais.</div>`;
+function updateEditorHint() {
+  const status = $("#editorStatus")?.value;
+  const map = {
+    G: "Marque quando a frequência foi enviada/regularizada.",
+    R: "A escola ficará pendente e poderá aparecer na cobrança diária.",
+    J: "Informe o motivo da justificativa para manter o histórico claro.",
+    X: "Use para dia/turno não letivo. Você pode registrar o motivo.",
+    ".": "Limpa o status deste dia/turno e deixa como sem registro."
+  };
+  $("#editorHint").textContent = map[status] || "A observação é opcional.";
+}
+
+function saveStatusEditor() {
+  if (!state.editor) return;
+  const { schoolId, day, shift, month } = state.editor;
+  const bundle = currentBundle(month);
+  const overrides = readOverrides();
+  const over = overrides[month] || { records: {}, schoolsMeta: {} };
+  over.records ||= {};
+  over.schoolsMeta ||= {};
+  const record = clone(over.records[schoolId] || bundle.records[schoolId] || { s: {} });
+  const ch = $("#editorStatus").value;
+  const reason = $("#editorReason").value.trim();
+  setStatusChar(record, shift, day, ch, month);
+  record.r ||= {};
+  if (reason && (ch === "J" || ch === "X" || ch === "R" || ch === "G")) {
+    record.r[String(day)] ||= {};
+    record.r[String(day)][shift] = reason;
+  } else if (record.r[String(day)]?.[shift]) {
+    delete record.r[String(day)][shift];
+    if (!Object.keys(record.r[String(day)]).length) delete record.r[String(day)];
+  }
+  over.records[schoolId] = record;
+  over.manualUpdatedAt = new Date().toISOString();
+  overrides[month] = over;
+  writeOverrides(overrides);
+  const editedDate = `${month}-${String(day).padStart(2,"0")}`;
+  closeStatusEditor();
+  renderMonitor();
+  if ($("#dailyDate")?.value === editedDate) renderCharges(editedDate);
+  showToast(`Status atualizado: ${STATUS_INFO[ch]?.label || "Sem registro"}.`);
 }
 
 function parseMonthYearFromCard(card) {
@@ -714,24 +789,29 @@ function formatDateBR(value) {
 function buildChargeGroups(date) {
   const daily = readDailyImports();
   const dayData = daily[date] || {};
+  const importedShifts = Object.keys(dayData);
+  if (!importedShifts.length) return [];
   const month = date.slice(0, 7);
   const day = Number(date.slice(-2));
   const bundle = currentBundle(month);
   const groups = new Map();
+  const rowMeta = new Map();
   Object.entries(dayData).forEach(([shift, imported]) => {
-    (imported.rows || []).forEach(row => {
-      if (row.frequency !== "nao_enviada") return;
-      const currentRecord = bundle.records[row.id];
-      if (currentRecord && statusChar(currentRecord, shift, day) !== "R") return;
-      const key = row.id || normalizeText(row.schoolName);
-      if (!groups.has(key)) groups.set(key, {
-        id: key,
-        schoolName: row.schoolName,
-        director: row.director,
-        area: row.area,
+    (imported.rows || []).forEach(row => rowMeta.set(`${row.id}|${shift}`, row));
+  });
+  Object.entries(bundle.records).forEach(([id, record]) => {
+    importedShifts.forEach(shift => {
+      if (statusChar(record, shift, day) !== "R") return;
+      const meta = bundle.schools[id] || {};
+      const imported = rowMeta.get(`${id}|${shift}`) || {};
+      if (!groups.has(id)) groups.set(id, {
+        id,
+        schoolName: meta.name || imported.schoolName || id,
+        director: imported.director || "",
+        area: meta.area || imported.area || "",
         shifts: []
       });
-      const group = groups.get(key);
+      const group = groups.get(id);
       if (!group.shifts.includes(shift)) group.shifts.push(shift);
     });
   });
@@ -793,6 +873,9 @@ function copyAllCharges() {
 function switchView(view) {
   $$(".nav-button").forEach(btn => btn.classList.toggle("active", btn.dataset.view === view));
   $$(".view").forEach(panel => panel.classList.toggle("active", panel.dataset.viewPanel === view));
+  const titles = { monitor: "Acompanhamento", daily: "CSV diário", import: "Importar Monitora" };
+  if ($("#workspaceTitle")) $("#workspaceTitle").textContent = titles[view] || "Frequência";
+  $("#sidebar")?.classList.remove("open");
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
@@ -807,6 +890,26 @@ function showToast(message) {
 
 function bindEvents() {
   $$(".nav-button").forEach(btn => btn.addEventListener("click", () => switchView(btn.dataset.view)));
+  $$('[data-go-view]').forEach(btn => btn.addEventListener('click', () => switchView(btn.dataset.goView)));
+  $("#menuToggle")?.addEventListener("click", () => $("#sidebar")?.classList.toggle("open"));
+  $("#schoolList")?.addEventListener("click", event => {
+    const chip = event.target.closest("[data-edit-status]");
+    if (!chip) return;
+    openStatusEditor(chip.dataset.schoolId, Number(chip.dataset.day), chip.dataset.shift);
+  });
+  $("#summaryGrid")?.addEventListener("click", event => {
+    const card = event.target.closest("[data-summary-filter]");
+    if (!card) return;
+    state.status = card.dataset.summaryFilter;
+    $("#statusFilter").value = state.status;
+    renderMonitor();
+  });
+  $("#closeEditor")?.addEventListener("click", closeStatusEditor);
+  $("#cancelEditor")?.addEventListener("click", closeStatusEditor);
+  $("#saveEditor")?.addEventListener("click", saveStatusEditor);
+  $("#editorStatus")?.addEventListener("change", updateEditorHint);
+  $("#statusModal")?.addEventListener("click", event => { if (event.target.id === "statusModal") closeStatusEditor(); });
+  document.addEventListener("keydown", event => { if (event.key === "Escape" && $("#statusModal")?.classList.contains("open")) closeStatusEditor(); });
   $("#monthSelect").addEventListener("change", e => { state.month = e.target.value; renderMonitor(); });
   $("#schoolSearch").addEventListener("input", e => { state.search = e.target.value; renderMonitor(); });
   $("#shiftFilter").addEventListener("change", e => { state.shift = e.target.value; renderMonitor(); });

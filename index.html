@@ -3,190 +3,230 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="theme-color" content="#0f766e" />
-  <meta name="description" content="Monitoramento diário de frequência escolar por CSV e atualização retroativa pelo Monitora" />
-  <title>Frequência Escolar</title>
+  <meta name="theme-color" content="#0b0710" />
+  <meta name="description" content="Central de monitoramento de frequência escolar" />
+  <title>Frequência Escolar · Central</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header class="topbar">
-    <div class="brand">
-      <div class="brand-mark">F</div>
-      <div>
-        <strong>Frequência Escolar</strong>
-        <span>Monitoramento diário e histórico</span>
-      </div>
-    </div>
-    <div class="topbar-actions">
-      <button class="nav-button active" data-view="monitor">Acompanhamento</button>
-      <button class="nav-button" data-view="daily">Importar CSV diário</button>
-      <button class="nav-button" data-view="import">Importar Monitora</button>
-    </div>
-  </header>
+  <div class="ambient ambient-a"></div>
+  <div class="ambient ambient-b"></div>
 
-  <main class="page">
-    <section class="view active" id="view-monitor" data-view-panel="monitor">
-      <div class="card filters-card">
-        <div class="field">
-          <label for="monthSelect">Mês</label>
-          <select id="monthSelect"></select>
-        </div>
-        <div class="field grow">
-          <label for="schoolSearch">Escola</label>
-          <input id="schoolSearch" type="search" placeholder="Buscar escola, INEP, cidade ou GRE/polo" autocomplete="off" />
-        </div>
-        <div class="field">
-          <label for="shiftFilter">Turno</label>
-          <select id="shiftFilter">
-            <option value="TODOS">Todos</option>
-            <option value="manha">Manhã</option>
-            <option value="integral">Integral</option>
-            <option value="tarde">Tarde</option>
-            <option value="noite">Noite</option>
-          </select>
-        </div>
-        <div class="field">
-          <label for="statusFilter">Situação</label>
-          <select id="statusFilter">
-            <option value="TODOS">Todas</option>
-            <option value="pendente">Pendentes</option>
-            <option value="justificada">Justificadas</option>
-            <option value="enviada">Com frequência</option>
-          </select>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark"><span>F</span></div>
+        <div class="brand-copy">
+          <strong>Frequência</strong>
+          <span>Central de monitoramento</span>
         </div>
       </div>
 
-      <div class="summary-grid" id="summaryGrid"></div>
+      <div class="sidebar-section-label">Operação</div>
+      <nav class="sidebar-nav" aria-label="Navegação principal">
+        <button class="nav-button active" data-view="monitor" type="button">
+          <span class="nav-icon">◫</span>
+          <span><b>Acompanhamento</b><small>Visão mensal</small></span>
+        </button>
+        <button class="nav-button" data-view="daily" type="button">
+          <span class="nav-icon">↥</span>
+          <span><b>CSV diário</b><small>Atualizar e cobrar</small></span>
+        </button>
+        <button class="nav-button" data-view="import" type="button">
+          <span class="nav-icon">↻</span>
+          <span><b>Monitora</b><small>Sincronizar retroativo</small></span>
+        </button>
+      </nav>
 
-      <div class="content-head">
-        <div>
-          <p class="eyebrow">Acompanhamento mensal</p>
-          <h1 id="monthTitle">Setembro de 2026</h1>
-          <p class="muted" id="sourceInfo"></p>
+      <div class="sidebar-bottom">
+        <div class="storage-chip">
+          <span class="pulse-dot"></span>
+          <div><strong>Dados locais</strong><small>Firebase será a próxima camada</small></div>
         </div>
-        <div class="legend">
-          <span><i class="swatch sent"></i> Com frequência</span>
-          <span><i class="swatch pending"></i> Pendente</span>
-          <span><i class="swatch justified"></i> Justificada</span>
-          <span><i class="swatch no-school"></i> Não letivo</span>
-          <span><i class="swatch blank"></i> Sem registro</span>
-        </div>
+        <div class="version">v0.4 · frontend interativo</div>
       </div>
+    </aside>
 
-      <div id="resultMeta" class="result-meta"></div>
-      <div id="schoolList" class="school-list"></div>
-    </section>
-
-    <section class="view" id="view-daily" data-view-panel="daily">
-      <div class="daily-intro card">
-        <div>
-          <p class="eyebrow">Rotina diária</p>
-          <h1>Importar CSV diário</h1>
-          <p class="muted">Escolha a <strong>data da frequência</strong> e o <strong>turno</strong>, depois carregue o CSV gerado pelo sistema. O arquivo atualiza o acompanhamento do dia e gera a cobrança apenas para quem estiver como <strong>não enviada</strong>.</p>
+    <div class="workspace">
+      <header class="workspace-topbar">
+        <div class="topbar-left">
+          <button class="menu-toggle" id="menuToggle" type="button" aria-label="Abrir menu">☰</button>
+          <div>
+            <p class="topbar-kicker">CENTRAL DE FREQUÊNCIA</p>
+            <h1 id="workspaceTitle">Acompanhamento</h1>
+          </div>
         </div>
-        <div class="source-badge">CSV = diário</div>
-      </div>
+        <div class="topbar-actions">
+          <button class="quick-action ghost" type="button" data-go-view="import">↻ Monitora</button>
+          <button class="quick-action primary" type="button" data-go-view="daily">＋ CSV diário</button>
+        </div>
+      </header>
 
-      <div class="daily-grid">
-        <article class="card import-card">
-          <div class="daily-fields">
-            <div class="field">
-              <label for="dailyDate">Data da frequência</label>
-              <input id="dailyDate" type="date" />
+      <main class="page">
+        <section class="view active" id="view-monitor" data-view-panel="monitor">
+          <div class="hero-row">
+            <div>
+              <p class="eyebrow">Painel operacional</p>
+              <h2 id="monthTitle">Setembro de 2026</h2>
+              <p class="muted" id="sourceInfo"></p>
             </div>
-            <div class="field">
-              <label for="dailyShift">Turno</label>
-              <select id="dailyShift">
+            <div class="live-pill"><span class="pulse-dot"></span> Monitoramento ativo</div>
+          </div>
+
+          <div class="card filters-card">
+            <div class="field compact-field">
+              <label for="monthSelect">Mês</label>
+              <select id="monthSelect"></select>
+            </div>
+            <div class="field grow">
+              <label for="schoolSearch">Pesquisar escola</label>
+              <div class="input-with-icon"><span>⌕</span><input id="schoolSearch" type="search" placeholder="Nome, INEP, cidade ou GRE/polo" autocomplete="off" /></div>
+            </div>
+            <div class="field compact-field">
+              <label for="shiftFilter">Turno</label>
+              <select id="shiftFilter">
+                <option value="TODOS">Todos</option>
                 <option value="manha">Manhã</option>
                 <option value="integral">Integral</option>
                 <option value="tarde">Tarde</option>
                 <option value="noite">Noite</option>
               </select>
             </div>
+            <div class="field compact-field">
+              <label for="statusFilter">Situação</label>
+              <select id="statusFilter">
+                <option value="TODOS">Todas</option>
+                <option value="pendente">Pendentes</option>
+                <option value="justificada">Justificadas</option>
+                <option value="enviada">Com frequência</option>
+              </select>
+            </div>
           </div>
 
-          <label class="drop-zone compact" id="csvDropZone" for="dailyCsvInput">
-            <input id="dailyCsvInput" type="file" accept=".csv,text/csv" hidden />
-            <span class="upload-icon">CSV</span>
-            <strong>Selecionar CSV do turno</strong>
-            <span>Colunas esperadas: escola, diretor, gerencia, frequencia, turmas e alunos</span>
-          </label>
+          <div class="summary-grid" id="summaryGrid"></div>
 
-          <div class="import-actions">
-            <button class="button ghost" id="clearDaily" type="button">Limpar</button>
-            <button class="button primary" id="applyDaily" type="button" disabled>Atualizar diário</button>
+          <div class="section-head">
+            <div>
+              <p class="eyebrow">Escolas</p>
+              <h3>Calendário de frequência</h3>
+              <p class="muted">Clique em qualquer turno para editar o status manualmente.</p>
+            </div>
+            <div class="legend">
+              <span><i class="swatch sent"></i> Frequência</span>
+              <span><i class="swatch pending"></i> Pendente</span>
+              <span><i class="swatch justified"></i> Justificada</span>
+              <span><i class="swatch no-school"></i> Não letivo</span>
+              <span><i class="swatch blank"></i> Sem registro</span>
+            </div>
           </div>
-        </article>
 
-        <article class="card preview-card">
-          <p class="eyebrow">Prévia do CSV</p>
-          <h2 id="dailyPreviewTitle">Nenhum arquivo selecionado</h2>
-          <div id="dailyPreview" class="empty-preview">
-            <div class="preview-icon">CSV</div>
-            <strong>Aguardando arquivo</strong>
-            <span>As frequências enviadas e pendentes aparecerão aqui antes da confirmação.</span>
+          <div id="resultMeta" class="result-meta"></div>
+          <div id="schoolList" class="school-list"></div>
+        </section>
+
+        <section class="view" id="view-daily" data-view-panel="daily">
+          <div class="hero-row">
+            <div>
+              <p class="eyebrow">Rotina diária</p>
+              <h2>Importar CSV do turno</h2>
+              <p class="muted">O CSV atualiza o dia no calendário e gera a cobrança das escolas que permanecerem pendentes.</p>
+            </div>
+            <div class="source-badge">CSV · operação diária</div>
           </div>
-        </article>
+
+          <div class="daily-grid">
+            <article class="card import-card">
+              <div class="card-title-row"><div><p class="eyebrow">Entrada</p><h3>Dados da importação</h3></div><span class="step-badge">01</span></div>
+              <div class="daily-fields">
+                <div class="field"><label for="dailyDate">Data da frequência</label><input id="dailyDate" type="date" /></div>
+                <div class="field"><label for="dailyShift">Turno</label><select id="dailyShift"><option value="manha">Manhã</option><option value="integral">Integral</option><option value="tarde">Tarde</option><option value="noite">Noite</option></select></div>
+              </div>
+              <label class="drop-zone compact" id="csvDropZone" for="dailyCsvInput">
+                <input id="dailyCsvInput" type="file" accept=".csv,text/csv" hidden />
+                <span class="upload-icon">CSV</span>
+                <strong>Arraste ou selecione o CSV</strong>
+                <span>escola · frequência · turmas · alunos</span>
+              </label>
+              <div class="import-actions"><button class="button ghost" id="clearDaily" type="button">Limpar</button><button class="button primary" id="applyDaily" type="button" disabled>Aplicar no diário</button></div>
+            </article>
+
+            <article class="card preview-card">
+              <div class="card-title-row"><div><p class="eyebrow">Validação</p><h3 id="dailyPreviewTitle">Nenhum arquivo selecionado</h3></div><span class="step-badge">02</span></div>
+              <div id="dailyPreview" class="empty-preview"><div class="preview-icon">CSV</div><strong>Aguardando arquivo</strong><span>Confira o resultado antes de gravar.</span></div>
+            </article>
+          </div>
+
+          <section class="card charge-card">
+            <div class="charge-head">
+              <div><p class="eyebrow">Cobrança diária</p><h3 id="chargeTitle">Pendências do dia</h3><p class="muted" id="chargeSubtitle">Importe os turnos para consolidar as cobranças.</p></div>
+              <button class="button ghost" id="copyAllCharges" type="button" disabled>Copiar todas</button>
+            </div>
+            <div id="chargeList" class="charge-list"><div class="empty-preview small-empty"><strong>Nenhuma cobrança carregada</strong><span>As escolas pendentes aparecerão aqui.</span></div></div>
+          </section>
+        </section>
+
+        <section class="view" id="view-import" data-view-panel="import">
+          <div class="hero-row">
+            <div><p class="eyebrow">Sincronização retroativa</p><h2>Importar HTML do Monitora</h2><p class="muted">Use o HTML para consolidar o histórico real: frequência, pendência, justificativa e dias não letivos.</p></div>
+            <div class="source-badge secondary">HTML · retroativo</div>
+          </div>
+
+          <div class="import-layout">
+            <article class="card import-card">
+              <div class="card-title-row"><div><p class="eyebrow">Arquivo</p><h3>Snapshot do Monitora</h3></div><span class="step-badge">01</span></div>
+              <p class="muted import-help">Salve a página “Acompanhamento de Frequência” e carregue o arquivo HTML aqui. O mês é detectado automaticamente.</p>
+              <label class="drop-zone" id="dropZone" for="monitoraInput">
+                <input id="monitoraInput" type="file" accept=".html,.htm,text/html" hidden />
+                <span class="upload-icon">HTML</span>
+                <strong>Arraste ou selecione o HTML</strong>
+                <span>Atualização somente das escolas encontradas</span>
+              </label>
+              <div class="import-actions"><button class="button ghost" id="clearImport" type="button">Limpar</button><button class="button primary" id="applyImport" type="button" disabled>Atualizar histórico</button></div>
+              <p class="storage-note">Nesta versão os dados ficam neste navegador. A interface já está pronta para trocar essa camada por Firestore.</p>
+            </article>
+
+            <article class="card preview-card">
+              <div class="card-title-row"><div><p class="eyebrow">Prévia</p><h3 id="previewTitle">Nenhum arquivo selecionado</h3></div><span class="step-badge">02</span></div>
+              <div id="importPreview" class="empty-preview"><div class="preview-icon">HTML</div><strong>Aguardando arquivo</strong><span>As alterações aparecem antes da confirmação.</span></div>
+            </article>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div class="modal-backdrop" id="statusModal" aria-hidden="true">
+    <div class="status-modal" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
+      <div class="modal-accent"></div>
+      <header class="modal-header">
+        <div><p class="eyebrow">Edição manual</p><h3 id="editorTitle">Atualizar frequência</h3></div>
+        <button class="modal-close" id="closeEditor" type="button" aria-label="Fechar">×</button>
+      </header>
+      <div class="editor-context">
+        <div><span>Escola</span><strong id="editorSchool">—</strong></div>
+        <div><span>Data</span><strong id="editorDate">—</strong></div>
+        <div><span>Turno</span><strong id="editorShift">—</strong></div>
       </div>
-
-      <section class="card charge-card">
-        <div class="charge-head">
-          <div>
-            <p class="eyebrow">Cobrança diária</p>
-            <h2 id="chargeTitle">Pendências do dia</h2>
-            <p class="muted" id="chargeSubtitle">Importe os turnos do dia para consolidar as cobranças.</p>
-          </div>
-          <button class="button ghost" id="copyAllCharges" type="button" disabled>Copiar todas</button>
+      <div class="modal-body">
+        <div class="field">
+          <label for="editorStatus">Situação</label>
+          <select id="editorStatus">
+            <option value="G">Com frequência</option>
+            <option value="R">Pendente</option>
+            <option value="J">Justificada</option>
+            <option value="X">Não letivo</option>
+            <option value=".">Sem registro</option>
+          </select>
         </div>
-        <div id="chargeList" class="charge-list">
-          <div class="empty-preview small-empty">
-            <strong>Nenhuma cobrança carregada</strong>
-            <span>Após importar um CSV, as escolas com “não enviada” aparecerão aqui.</span>
-          </div>
+        <div class="field">
+          <label for="editorReason">Motivo / observação</label>
+          <textarea id="editorReason" rows="4" placeholder="Ex.: Falta de energia, atividade pedagógica, ajuste manual..."></textarea>
+          <p class="field-help" id="editorHint">A observação é opcional.</p>
         </div>
-      </section>
-    </section>
-
-    <section class="view" id="view-import" data-view-panel="import">
-      <div class="retro-note card">
-        <div>
-          <p class="eyebrow">Retroativo</p>
-          <h1>Importar Monitora</h1>
-          <p class="muted">Use esta opção somente para corrigir ou consolidar o histórico. O HTML do Monitora atualiza o mês inteiro, incluindo frequências, pendências e justificativas.</p>
-        </div>
-        <div class="source-badge secondary">HTML = retroativo</div>
       </div>
-
-      <div class="import-layout">
-        <article class="card import-card">
-          <p class="muted import-help">Baixe/salve a página <strong>Acompanhamento de Frequência</strong> do Monitora em HTML e selecione o arquivo aqui. O app lê as cores e os turnos do próprio HTML e atualiza somente as escolas presentes no arquivo.</p>
-
-          <label class="drop-zone" id="dropZone" for="monitoraInput">
-            <input id="monitoraInput" type="file" accept=".html,.htm,text/html" hidden />
-            <span class="upload-icon">⇧</span>
-            <strong>Selecionar HTML do Monitora</strong>
-            <span>ou arraste o arquivo para esta área</span>
-          </label>
-
-          <div class="import-actions">
-            <button class="button ghost" id="clearImport" type="button">Limpar</button>
-            <button class="button primary" id="applyImport" type="button" disabled>Atualizar histórico</button>
-          </div>
-          <p class="storage-note">Nesta versão, as importações ficam salvas neste navegador. O Firebase entra depois apenas como sincronização/armazenamento.</p>
-        </article>
-
-        <article class="card preview-card">
-          <p class="eyebrow">Prévia da importação</p>
-          <h2 id="previewTitle">Nenhum arquivo selecionado</h2>
-          <div id="importPreview" class="empty-preview">
-            <div class="preview-icon">HTML</div>
-            <strong>Aguardando arquivo</strong>
-            <span>O mês, as escolas e as alterações aparecerão aqui antes da confirmação.</span>
-          </div>
-        </article>
-      </div>
-    </section>
-  </main>
+      <footer class="modal-footer"><button class="button ghost" id="cancelEditor" type="button">Cancelar</button><button class="button primary" id="saveEditor" type="button">Salvar alteração</button></footer>
+    </div>
+  </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="app.js"></script>
