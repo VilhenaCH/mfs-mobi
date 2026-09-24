@@ -1,4 +1,4 @@
-# Frequência Escolar — V0.4
+# Frequência Escolar — V0.4.2
 
 Versão focada em interface operacional estilo CRM/dark e edição manual do calendário.
 
@@ -25,3 +25,11 @@ A edição manual também aceita motivo/observação. Se uma pendência for regu
 - `app.js`
 
 Compatível com GitHub Pages.
+
+
+## Correções da V0.4.2
+
+- Corrigida a função de renderização do acompanhamento que estava ausente na V0.4.
+- Reconstruída a base histórica de fevereiro a setembro diretamente dos HTMLs do Monitora.
+- Corrigida a leitura dos dias 16 em diante, cujos badges no HTML salvo podem não possuir `data-id`.
+- Adicionado tratamento visível de erro de inicialização para evitar uma tela apenas com o design caso ocorra uma falha JavaScript.
