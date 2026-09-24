@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#0f766e" />
+  <meta name="description" content="Monitoramento de frequência escolar - protótipo SEDUC/SEMEC" />
+  <title>Frequência Escolar</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" id="sidebar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">F</div>
+        <div>
+          <strong>Frequência</strong>
+          <span>Monitoramento escolar</span>
+        </div>
+      </div>
+
+      <nav class="side-nav" aria-label="Navegação principal">
+        <button class="nav-item active" data-view="dashboard">
+          <span class="nav-icon">⌂</span><span>Dashboard</span>
+        </button>
+        <button class="nav-item" data-view="monitoramento">
+          <span class="nav-icon">▦</span><span>Acompanhamento</span>
+        </button>
+        <button class="nav-item" data-view="importacao">
+          <span class="nav-icon">⇧</span><span>Importar CSV</span>
+        </button>
+        <button class="nav-item" data-view="pendencias">
+          <span class="nav-icon">!</span><span>Pendências</span>
+        </button>
+        <button class="nav-item" data-view="escolas">
+          <span class="nav-icon">⌂</span><span>Escolas</span>
+        </button>
+      </nav>
+
+      <div class="sidebar-note">
+        <span class="dot dot-demo"></span>
+        <div>
+          <strong>Versão 0.1</strong>
+          <span>Protótipo local</span>
+        </div>
+      </div>
+    </aside>
+
+    <div class="page-shell">
+      <header class="topbar">
+        <div class="topbar-left">
+          <button class="icon-button menu-button" id="menuButton" aria-label="Abrir menu">☰</button>
+          <div>
+            <p class="eyebrow" id="viewEyebrow">Visão geral</p>
+            <h1 id="viewTitle">Dashboard</h1>
+          </div>
+        </div>
+        <div class="topbar-actions">
+          <span class="demo-pill">Dados demonstrativos</span>
+          <button class="user-chip" id="userChip" type="button" title="Autenticação Firebase será conectada na próxima etapa">
+            <span class="avatar">TC</span>
+            <span class="user-copy"><strong>Técnico</strong><small>modo demonstração</small></span>
+          </button>
+        </div>
+      </header>
+
+      <main>
+        <section class="view active" id="view-dashboard" data-view-panel="dashboard">
+          <div class="toolbar card">
+            <div class="field-group compact">
+              <label for="dashMonth">Mês</label>
+              <select id="dashMonth">
+                <option value="2026-08" selected>Agosto de 2026</option>
+              </select>
+            </div>
+            <div class="network-segment" id="dashboardNetworkFilter" aria-label="Filtrar rede">
+              <button class="segment active" data-network="TODAS">Todas</button>
+              <button class="segment" data-network="SEDUC">SEDUC</button>
+              <button class="segment" data-network="SEMEC">SEMEC</button>
+            </div>
+          </div>
+
+          <div class="kpi-grid" id="kpiGrid"></div>
+
+          <div class="dashboard-grid">
+            <article class="card panel-card">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Por rede</p>
+                  <h2>Resumo de agosto</h2>
+                </div>
+                <span class="subtle" id="calendarScopeLabel"></span>
+              </div>
+              <div id="networkSummary" class="network-summary"></div>
+            </article>
+
+            <article class="card panel-card">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Atenção</p>
+                  <h2>Pendências prioritárias</h2>
+                </div>
+                <button class="text-button" data-go="pendencias">Ver todas</button>
+              </div>
+              <div id="priorityPending" class="priority-list"></div>
+            </article>
+          </div>
+
+          <article class="card panel-card calendar-explainer">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Calendários ativos</p>
+                <h2>Regras de agosto de 2026</h2>
+              </div>
+            </div>
+            <div class="calendar-rule-grid">
+              <div class="rule-card seduc-rule">
+                <span class="network-badge seduc">SEDUC</span>
+                <strong>23 dias letivos</strong>
+                <p>Dias úteis de agosto + sábados letivos em 22 e 29.</p>
+              </div>
+              <div class="rule-card semec-rule">
+                <span class="network-badge semec">SEMEC</span>
+                <strong>19 dias letivos</strong>
+                <p>Férias até 03/08, encontro pedagógico em 04/08 e aulas a partir de 05/08.</p>
+              </div>
+            </div>
+          </article>
+        </section>
+
+        <section class="view" id="view-monitoramento" data-view-panel="monitoramento">
+          <div class="card monitor-toolbar">
+            <div class="toolbar-row">
+              <div class="field-group">
+                <label for="monitorNetwork">Rede</label>
+                <select id="monitorNetwork">
+                  <option value="TODAS">Todas as redes</option>
+                  <option value="SEDUC">SEDUC</option>
+                  <option value="SEMEC">SEMEC</option>
+                </select>
+              </div>
+              <div class="field-group grow">
+                <label for="monitorSchool">Escola</label>
+                <select id="monitorSchool"><option value="TODAS">Todas as escolas</option></select>
+              </div>
+              <div class="field-group">
+                <label for="monitorShift">Turno</label>
+                <select id="monitorShift">
+                  <option value="TODOS">Todos</option>
+                  <option value="manha">Manhã</option>
+                  <option value="integral">Integral</option>
+                  <option value="tarde">Tarde</option>
+                  <option value="noite">Noite</option>
+                </select>
+              </div>
+              <div class="field-group">
+                <label for="monitorStatus">Situação</label>
+                <select id="monitorStatus">
+                  <option value="TODOS">Todas</option>
+                  <option value="enviada">Com envio</option>
+                  <option value="pendente">Com pendência</option>
+                </select>
+              </div>
+            </div>
+            <div class="legend" aria-label="Legenda">
+              <span><i class="status-swatch sent"></i> Enviada</span>
+              <span><i class="status-swatch pending"></i> Não enviada</span>
+              <span><i class="status-swatch waiting"></i> Aguardando</span>
+              <span><i class="status-swatch no-class"></i> Não letivo</span>
+              <span><i class="status-swatch special"></i> Letivo especial</span>
+            </div>
+          </div>
+          <div class="monitor-meta">
+            <div>
+              <p class="eyebrow">Acompanhamento da frequência</p>
+              <h2>Agosto de 2026</h2>
+            </div>
+            <span class="subtle" id="monitorResultCount"></span>
+          </div>
+          <div id="schoolMonitorList" class="school-monitor-list"></div>
+        </section>
+
+        <section class="view" id="view-importacao" data-view-panel="importacao">
+          <div class="import-grid">
+            <article class="card panel-card">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Entrada de dados</p>
+                  <h2>Importar frequência</h2>
+                </div>
+              </div>
+              <p class="helper">O CSV é lido no próprio navegador. Nesta versão, os resultados ficam no armazenamento local do navegador para você testar o fluxo.</p>
+              <div class="form-grid">
+                <div class="field-group">
+                  <label for="importDate">Data de referência</label>
+                  <input type="date" id="importDate" value="2026-08-31" />
+                </div>
+                <div class="field-group">
+                  <label for="importShift">Turno</label>
+                  <select id="importShift">
+                    <option value="manha">Manhã</option>
+                    <option value="integral">Integral</option>
+                    <option value="tarde">Tarde</option>
+                    <option value="noite">Noite</option>
+                  </select>
+                </div>
+              </div>
+
+              <label class="drop-zone" id="dropZone" for="csvInput">
+                <input type="file" id="csvInput" accept=".csv,text/csv" hidden />
+                <span class="drop-icon">⇧</span>
+                <strong>Arraste o CSV aqui</strong>
+                <span>ou clique para selecionar</span>
+                <small>Colunas esperadas: escola, frequencia, turmas e alunos.</small>
+              </label>
+
+              <div class="import-actions">
+                <button class="button secondary" id="resetImport">Limpar</button>
+                <button class="button primary" id="confirmImport" disabled>Confirmar importação</button>
+              </div>
+            </article>
+
+            <article class="card panel-card import-preview-card">
+              <div class="section-heading">
+                <div>
+                  <p class="eyebrow">Prévia</p>
+                  <h2 id="previewTitle">Nenhum arquivo selecionado</h2>
+                </div>
+              </div>
+              <div id="importPreview" class="empty-state">
+                <div class="empty-icon">CSV</div>
+                <strong>A prévia aparecerá aqui</strong>
+                <span>O sistema valida as escolas antes de gravar.</span>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="view" id="view-pendencias" data-view-panel="pendencias">
+          <div class="card panel-card">
+            <div class="section-heading pending-heading">
+              <div>
+                <p class="eyebrow">Ação necessária</p>
+                <h2>Pendências de agosto</h2>
+              </div>
+              <div class="network-segment" id="pendingNetworkFilter">
+                <button class="segment active" data-network="TODAS">Todas</button>
+                <button class="segment" data-network="SEDUC">SEDUC</button>
+                <button class="segment" data-network="SEMEC">SEMEC</button>
+              </div>
+            </div>
+            <div id="pendingList" class="pending-list"></div>
+          </div>
+        </section>
+
+        <section class="view" id="view-escolas" data-view-panel="escolas">
+          <div class="card panel-card">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">Cadastro mestre</p>
+                <h2>Escolas</h2>
+              </div>
+              <span class="subtle">A rede e o calendário pertencem ao cadastro da escola.</span>
+            </div>
+            <div class="school-table-wrap">
+              <table class="school-table">
+                <thead>
+                  <tr><th>Escola</th><th>Rede</th><th>Gerência / Município</th><th>Calendário</th><th>Turnos</th></tr>
+                </thead>
+                <tbody id="schoolTableBody"></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
