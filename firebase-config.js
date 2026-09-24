@@ -1,23 +1,51 @@
 /*
-  MFS - Configuração pública do Firebase Web.
-  Esta configuração NÃO é uma chave administrativa e pode permanecer no GitHub Pages.
-  A proteção dos dados é feita por Firebase Authentication, Firestore Security Rules e App Check.
+  MFS - Monitoramento de Frequência Supremo
+  Mobieduca.me
+
+  Configuração pública do Firebase Web.
+
+  IMPORTANTE:
+  Esta configuração pode ficar no GitHub Pages.
+  A segurança dos dados será feita por:
+  - Firebase Authentication
+  - Firestore Security Rules
+  - App Check
 */
+
 window.MFS_FIREBASE_CONFIG = {
+
   firebase: {
-    apiKey: "COLE_AQUI",
-    authDomain: "COLE_AQUI.firebaseapp.com",
-    projectId: "COLE_AQUI",
-    storageBucket: "COLE_AQUI.firebasestorage.app",
-    messagingSenderId: "COLE_AQUI",
-    appId: "COLE_AQUI"
+    apiKey: "AIzaSyC86KeZvJUH6zSJo9ctO3YhVOkKpM73VPU",
+
+    authDomain: "mfs-mobi.firebaseapp.com",
+
+    projectId: "mfs-mobi",
+
+    storageBucket: "mfs-mobi.firebasestorage.app",
+
+    messagingSenderId: "2633594017",
+
+    appId: "1:2633594017:web:0b59f22d1dd8b24d63ace0"
   },
 
-  // Opcional, mas recomendado antes de colocar o MFS em produção.
-  // Crie uma chave de site reCAPTCHA Enterprise no App Check e cole aqui.
+  /*
+    APP CHECK
+
+    Por enquanto deixe vazio.
+
+    Depois que configurarmos o Firebase App Check
+    com reCAPTCHA Enterprise, colocaremos aqui
+    a Site Key fornecida pelo Firebase.
+  */
   appCheckSiteKey: "",
 
-  // O app usa sessão do navegador: ao fechar a sessão do navegador,
-  // o usuário precisa autenticar novamente no MFS.
+  /*
+    true:
+    o login dura enquanto a sessão do navegador estiver ativa.
+
+    false:
+    o Firebase poderá manter o usuário conectado
+    mesmo depois de fechar e abrir o navegador.
+  */
   sessionOnly: true
 };
