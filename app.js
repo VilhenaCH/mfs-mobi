@@ -257,10 +257,9 @@ function openSelectPortal(wrapper) {
 function enhanceSelect(select) {
   if (!select || select.multiple) return;
 
-  if (select.dataset.mfsSelect === "1") {
-    select._mfsRefresh?.();
-    return;
-  }
+  // Selects já inicializados não devem ser reconstruídos automaticamente.
+  // A atualização explícita é feita por syncCustomSelect() quando necessário.
+  if (select.dataset.mfsSelect === "1") return;
 
   select.dataset.mfsSelect = "1";
   const wrapper = document.createElement("div");
@@ -284,11 +283,26 @@ function enhanceSelect(select) {
   wrapper._mfsMenu = menu;
   wrapper._mfsTrigger = trigger;
 
+  let lastMenuSignature = "";
+
   const refresh = () => {
     const selected = select.options[select.selectedIndex] || select.options[0];
     trigger.querySelector(".mfs-select-value").textContent = selected?.textContent?.trim() || "Selecionar";
     trigger.disabled = select.disabled;
     wrapper.classList.toggle("disabled", select.disabled);
+
+    // Só reconstrói as opções quando alguma opção realmente mudou.
+    // Isso evita churn de DOM e mantém o elemento clicado estável entre pointerdown/click.
+    const signature = [...select.options].map(option => [
+      option.value,
+      option.textContent.trim(),
+      option.selected ? "1" : "0",
+      option.disabled ? "1" : "0"
+    ].join("\u0001")).join("\u0002");
+
+    if (signature === lastMenuSignature) return;
+    lastMenuSignature = signature;
+
     menu.innerHTML = [...select.options].map(option => `
       <button type="button" class="mfs-select-option ${option.selected ? "selected" : ""}" role="option"
         data-value="${escapeHtml(option.value)}" aria-selected="${option.selected ? "true" : "false"}" ${option.disabled ? "disabled" : ""}>
@@ -310,10 +324,14 @@ function enhanceSelect(select) {
     event.stopPropagation();
     const optionButton = event.target.closest(".mfs-select-option");
     if (!optionButton || optionButton.disabled) return;
-    select.value = optionButton.dataset.value;
-    select.dispatchEvent(new Event("change", { bubbles: true }));
-    refresh();
-    restoreSelectMenu(wrapper);
+    const nextValue = optionButton.dataset.value;
+    if (select.value !== nextValue) {
+      select.value = nextValue;
+      select.dispatchEvent(new Event("change", { bubbles: true }));
+    } else {
+      syncCustomSelect(select);
+    }
+    if (wrapper.isConnected) restoreSelectMenu(wrapper);
   });
 
   select.addEventListener("change", refresh);
@@ -328,6 +346,10 @@ function syncCustomSelect(select) {
 }
 
 function initCustomSelectSystem() {
+  // Inicializa apenas os selects já existentes. Selects criados dinamicamente
+  // são inicializados explicitamente pelo componente que os criou.
+  // NÃO observar o body inteiro: isso causava um loop de MutationObserver ->
+  // refresh -> innerHTML -> MutationObserver, travando a interface e invalidando cliques.
   enhanceAllSelects();
 
   document.addEventListener("click", event => {
@@ -341,9 +363,6 @@ function initCustomSelectSystem() {
 
   window.addEventListener("resize", scheduleSelectPortalPosition, { passive: true });
   window.addEventListener("scroll", scheduleSelectPortalPosition, { passive: true, capture: true });
-
-  const observer = new MutationObserver(() => requestAnimationFrame(() => enhanceAllSelects()));
-  observer.observe(document.body, { childList: true, subtree: true });
 }
 
 function initMotionInteractions() {
