@@ -860,7 +860,7 @@ function renderCalendarHalf(id, record, shifts, month, startDay, endDay) {
       const info = STATUS_INFO[ch] || STATUS_INFO["?"];
       const reason = record?.r?.[String(day)]?.[shift] || (ch === "X" ? record?.n?.[String(day)] : "") || "";
       const title = `${String(day).padStart(2,"0")}/${month.slice(5,7)}/${month.slice(0,4)} · ${SHIFT_LABELS[shift]} · ${info.label}${reason ? ` · ${reason}` : ""}`;
-      return `<button class="status-chip ${info.cls}${reason ? " has-reason" : ""}" type="button" data-edit-status="1" data-school-id="${escapeHtml(id)}" data-day="${day}" data-shift="${shift}" data-status-char="${ch}" data-selection-key="${escapeHtml(`${id}|${day}|${shift}`)}" title="${escapeHtml(title)}">${shiftCode(shift)}</button>`;
+      return `<button class="status-chip ${info.cls}${reason ? " has-reason" : ""}" type="button" data-edit-status="1" data-school-id="${escapeHtml(id)}" data-day="${day}" data-shift="${shift}" data-status-char="${ch}" data-month="${month}" data-selection-key="${escapeHtml(selectionKey(id,day,shift,month))}" title="${escapeHtml(title)}">${shiftCode(shift)}</button>`;
     }).join("");
     days.push(`<div class="calendar-day ${isToday ? "today-column" : ""}">${chips}</div>`);
   }
@@ -881,15 +881,21 @@ function renderSchoolCard(id, meta, record, month) {
   </article>`;
 }
 
-function openStatusEditor(schoolId, day, shift) {
-  const record = state.records[schoolId];
+function editableRecordForMonth(schoolId, month) {
+  if (month === state.month && state.records?.[schoolId]) return state.records[schoolId];
+  if (state.schoolHistoryId === schoolId && state.schoolHistoryRecords?.[month]) return state.schoolHistoryRecords[month];
+  return null;
+}
+
+function openStatusEditor(schoolId, day, shift, month = state.month) {
+  const record = editableRecordForMonth(schoolId, month);
   if (!record) return;
   const meta = state.schools[schoolId] || {};
   const ch = statusChar(record, shift, day);
   const reason = record?.r?.[String(day)]?.[shift] || (ch === "X" ? record?.n?.[String(day)] : "") || "";
-  state.editor = { schoolId, day:Number(day), shift, month:state.month, before:ch };
+  state.editor = { schoolId, day:Number(day), shift, month, before:ch };
   $("#editorSchool").textContent = meta.name || schoolId;
-  $("#editorDate").textContent = `${String(day).padStart(2,"0")}/${state.month.slice(5,7)}/${state.month.slice(0,4)}`;
+  $("#editorDate").textContent = `${String(day).padStart(2,"0")}/${month.slice(5,7)}/${month.slice(0,4)}`;
   $("#editorShift").textContent = SHIFT_LABELS[shift] || shift;
   $("#editorStatus").value = ["G","R","J","X","."].includes(ch) ? ch : ".";
   syncCustomSelect($("#editorStatus"));
@@ -914,10 +920,18 @@ function updateEditorHint() {
 async function saveStatusEditor() {
   if (!state.editor) return;
   const { schoolId, day, shift, month, before } = state.editor;
-  const record = clone(state.records[schoolId] || { s:{} });
+  const record = clone(editableRecordForMonth(schoolId, month) || { s:{}, r:{}, n:{} });
   const after = $("#editorStatus").value;
   const reason = $("#editorReason").value.trim();
   setStatusChar(record, shift, day, after, month);
+  record.r ||= {};
+  if (reason && after !== ".") {
+    record.r[String(day)] ||= {};
+    record.r[String(day)][shift] = reason;
+  } else if (record.r[String(day)]) {
+    delete record.r[String(day)][shift];
+    if (!Object.keys(record.r[String(day)]).length) delete record.r[String(day)];
+  }
   const updates = {
     [`s.${shift}`]: record.s[shift],
     updatedAt: serverTimestamp(),
@@ -942,6 +956,14 @@ async function saveStatusEditor() {
       createdBy:state.user.uid,
       createdByEmail:state.user.email || ""
     });
+
+    // Atualização otimista para a tela em que o técnico está trabalhando.
+    if (month === state.month && state.records?.[schoolId]) state.records[schoolId] = clone(record);
+    if (state.schoolHistoryId === schoolId && state.schoolHistoryRecords?.[month]) {
+      state.schoolHistoryRecords[month] = clone(record);
+      renderSchoolHistory();
+    }
+
     const editedDate = `${month}-${String(day).padStart(2,"0")}`;
     closeStatusEditor();
     if ($("#dailyDate")?.value === editedDate) renderCharges(editedDate);
@@ -1953,19 +1975,65 @@ function subscribeAssistantEvents(){if(typeof state.unsubAssistantEvents==="func
 async function addAssistantEvent(){if(!isAdmin())return;const title=$("#eventTitleInput")?.value.trim(),date=$("#eventDateInput")?.value,time=$("#eventTimeInput")?.value||"";if(!title||!date){showToast("Informe título e data do evento.");return;}await addDoc(collection(db,"assistantEvents"),{title,date,time,active:true,createdAt:serverTimestamp(),createdBy:state.user.uid,updatedAt:serverTimestamp(),updatedBy:state.user.uid});$("#eventTitleInput").value="";showToast("Evento compartilhado adicionado.");}
 async function renderCalendarAlerts(){if(!$("#calendarAlerts"))return;const today=localISODate();const tomorrow=addDaysToDateKey(today,1);const relevant=Object.values(state.assistantEvents).filter(e=>e.active!==false&&[today,tomorrow].includes(e.date)).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));let occurrenceRows=[];try{const month=today.slice(0,7);const records=month===state.month?state.records:await getMonthRecordsOnce(month);const day=String(Number(today.slice(-2)));const grouped=new Map();Object.entries(records).forEach(([id,record])=>{const reason=record?.n?.[day];if(reason){const key=reason;if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(state.schools[id]?.name||id);}});occurrenceRows=[...grouped.entries()].map(([reason,schools])=>({title:reason,date:today,time:"",detail:`${schools.length} escola(s) com ocorrência no calendário`}));}catch{}const all=[...relevant.map(e=>({...e,detail:e.detail||"Evento compartilhado"})),...occurrenceRows];$("#calendarAlerts").innerHTML=all.length?all.map(e=>`<div class="calendar-alert"><strong>${escapeHtml(e.title)}</strong><span>${e.date===today?"Hoje":"Amanhã"}${e.time?` · ${e.time}`:""} · ${escapeHtml(e.detail||"")}</span></div>`).join(""):`<div class="assistant-loading">Nenhum evento ou ocorrência relevante para hoje e amanhã.</div>`;}
 
-function selectionKey(schoolId,day,shift){return `${schoolId}|${day}|${shift}`;}
-function selectPendingChip(button){if(button?.dataset.statusChar!=="R")return;const key=button.dataset.selectionKey||selectionKey(button.dataset.schoolId,button.dataset.day,button.dataset.shift);state.bulkSelection.set(key,{schoolId:button.dataset.schoolId,day:Number(button.dataset.day),shift:button.dataset.shift,month:state.month});button.classList.add("bulk-selected");}
+function selectionKey(schoolId,day,shift,month=state.month){return `${month}|${schoolId}|${day}|${shift}`;}
+function selectPendingChip(button){
+  if(button?.dataset.statusChar!=="R")return;
+  const month=button.dataset.month||state.month;
+  const key=button.dataset.selectionKey||selectionKey(button.dataset.schoolId,button.dataset.day,button.dataset.shift,month);
+  state.bulkSelection.set(key,{schoolId:button.dataset.schoolId,day:Number(button.dataset.day),shift:button.dataset.shift,month});
+  button.classList.add("bulk-selected");
+}
 function clearBulkSelection(){state.bulkSelection.clear();$$('.status-chip.bulk-selected').forEach(el=>el.classList.remove('bulk-selected'));if($("#bulkActionBar"))$("#bulkActionBar").hidden=true;document.body.classList.remove("bulk-selecting");}
-function updateBulkBar(){const count=state.bulkSelection.size;if(!$("#bulkActionBar"))return;$("#bulkActionBar").hidden=!count;$("#bulkCount").textContent=`${count} pendência${count===1?"":"s"} selecionada${count===1?"":"s"}`;}
-function beginPendingDrag(event,button){if(event.button!==0||button.dataset.statusChar!=="R")return;event.preventDefault();state.dragSelection={active:true,moved:false,startKey:button.dataset.selectionKey};clearBulkSelection();state.dragSelection={active:true,moved:false,startKey:button.dataset.selectionKey};selectPendingChip(button);document.body.classList.add("bulk-selecting");}
-function movePendingDrag(button){if(!state.dragSelection?.active||button.dataset.statusChar!=="R")return;const key=button.dataset.selectionKey;if(key!==state.dragSelection.startKey)state.dragSelection.moved=true;selectPendingChip(button);}
+function updateBulkBar(){const count=state.bulkSelection.size;if(!$("#bulkActionBar"))return;$("#bulkActionBar").hidden=!count;const months=new Set([...state.bulkSelection.values()].map(x=>x.month));$("#bulkCount").textContent=`${count} pendência${count===1?"":"s"} selecionada${count===1?"":"s"}${months.size>1?` · ${months.size} meses`:""}`;}
+function beginPendingDrag(event,button){if(event.button!==0||button.dataset.statusChar!=="R")return;event.preventDefault();const month=button.dataset.month||state.month;const startKey=button.dataset.selectionKey||selectionKey(button.dataset.schoolId,button.dataset.day,button.dataset.shift,month);clearBulkSelection();state.dragSelection={active:true,moved:false,startKey};selectPendingChip(button);document.body.classList.add("bulk-selecting");}
+function movePendingDrag(button){if(!state.dragSelection?.active||button.dataset.statusChar!=="R")return;const month=button.dataset.month||state.month;const key=button.dataset.selectionKey||selectionKey(button.dataset.schoolId,button.dataset.day,button.dataset.shift,month);if(key!==state.dragSelection.startKey)state.dragSelection.moved=true;selectPendingChip(button);}
 function finishPendingDrag(){if(!state.dragSelection?.active)return;const moved=state.dragSelection.moved;state.dragSelection=null;document.body.classList.remove("bulk-selecting");if(moved){state.suppressStatusClickUntil=Date.now()+350;updateBulkBar();}else{clearBulkSelection();}}
 
 function bulkChargeMessages(){const groups=new Map();for(const item of state.bulkSelection.values()){if(!groups.has(item.schoolId))groups.set(item.schoolId,{schoolId:item.schoolId,schoolName:state.schools[item.schoolId]?.name||item.schoolId,dates:new Map()});const g=groups.get(item.schoolId);const date=`${item.month}-${pad2(item.day)}`;if(!g.dates.has(date))g.dates.set(date,[]);g.dates.get(date).push(item.shift);}return [...groups.values()].map(group=>{const greeting=greetingByTime();const pieces=[...group.dates.entries()].sort().map(([date,shifts])=>`${date===localISODate()?"hoje":formatDateBR(date)} (${naturalShiftText(shifts)})`);const datesText=pieces.length===1?pieces[0]:pieces.length===2?pieces.join(" e "):`${pieces.slice(0,-1).join(", ")} e ${pieces.at(-1)}`;return `Olá, ${greeting}! Ao revisar as frequências da ${group.schoolName}, verifiquei que ainda existem pendências em ${datesText}. Você consegue confirmar para mim se essas frequências foram realizadas corretamente ou se houve algum problema? Caso ainda seja necessário algum ajuste, me avise se está disponível para eu liberar a correção e deixarmos tudo certo. Obrigado!`;});}
 function copyBulkCharges(){const messages=bulkChargeMessages();if(!messages.length)return;copyText(messages.join("\n\n--------------------\n\n"));showToast(`${messages.length} cobrança(s) gerada(s) a partir da seleção.`);}
 
-async function applyBulkStatus(){if(!state.bulkSelection.size)return;const after=$("#bulkStatusSelect").value;const reason=$("#bulkReasonInput").value.trim();const grouped=new Map();for(const item of state.bulkSelection.values()){if(!grouped.has(item.schoolId))grouped.set(item.schoolId,[]);grouped.get(item.schoolId).push(item);}const operations=[];for(const [schoolId,items] of grouped){const current=clone(state.records[schoolId]||{s:{},r:{}});current.r ||= {};for(const item of items){setStatusChar(current,item.shift,item.day,after,item.month);current.r[String(item.day)] ||= {};if(reason&&after!==".")current.r[String(item.day)][item.shift]=reason;else delete current.r[String(item.day)][item.shift];if(!Object.keys(current.r[String(item.day)]).length)delete current.r[String(item.day)];}operations.push(batch=>batch.set(doc(db,"months",state.month,"schools",schoolId),{schoolId,month:state.month,s:current.s||{},r:current.r||{},n:current.n||{},source:"bulk_manual",updatedAt:serverTimestamp(),updatedBy:state.user.uid},{merge:true}));}
-  try{await commitWriteOperationsInChunks(operations);await addDoc(collection(db,"auditLogs"),{type:"bulk_status",month:state.month,count:state.bulkSelection.size,after,reason,createdAt:serverTimestamp(),createdBy:state.user.uid,createdByEmail:state.user.email||""});clearBulkSelection();showToast("Alteração em massa aplicada.");}catch(error){console.error(error);showToast("Não foi possível aplicar a alteração em massa.");}}
+async function applyBulkStatus(){
+  if(!state.bulkSelection.size)return;
+  const after=$("#bulkStatusSelect").value;
+  const reason=$("#bulkReasonInput").value.trim();
+  const selectedItems=[...state.bulkSelection.values()];
+  const grouped=new Map();
+  for(const item of selectedItems){
+    const key=`${item.month}|${item.schoolId}`;
+    if(!grouped.has(key))grouped.set(key,{month:item.month,schoolId:item.schoolId,items:[]});
+    grouped.get(key).items.push(item);
+  }
+  const operations=[];
+  const optimistic=[];
+  for(const {month,schoolId,items} of grouped.values()){
+    const current=clone(editableRecordForMonth(schoolId,month)||{s:{},r:{},n:{}});
+    current.r ||= {};
+    for(const item of items){
+      setStatusChar(current,item.shift,item.day,after,month);
+      current.r[String(item.day)] ||= {};
+      if(reason&&after!==".")current.r[String(item.day)][item.shift]=reason;
+      else delete current.r[String(item.day)][item.shift];
+      if(!Object.keys(current.r[String(item.day)]).length)delete current.r[String(item.day)];
+    }
+    optimistic.push({month,schoolId,record:clone(current)});
+    operations.push(batch=>batch.set(doc(db,"months",month,"schools",schoolId),{
+      schoolId,month,s:current.s||{},r:current.r||{},n:current.n||{},source:"bulk_manual",updatedAt:serverTimestamp(),updatedBy:state.user.uid
+    },{merge:true}));
+  }
+  try{
+    await commitWriteOperationsInChunks(operations);
+    const months=[...new Set(selectedItems.map(item=>item.month))].sort();
+    await addDoc(collection(db,"auditLogs"),{type:"bulk_status",months,count:selectedItems.length,after,reason,createdAt:serverTimestamp(),createdBy:state.user.uid,createdByEmail:state.user.email||""});
+    for(const item of optimistic){
+      if(item.month===state.month&&state.records?.[item.schoolId])state.records[item.schoolId]=clone(item.record);
+      if(state.schoolHistoryId===item.schoolId&&state.schoolHistoryRecords?.[item.month])state.schoolHistoryRecords[item.month]=clone(item.record);
+    }
+    clearBulkSelection();
+    if($("#view-school")?.classList.contains("active"))renderSchoolHistory();
+    else renderMonitor();
+    showToast(`Alteração em massa aplicada em ${selectedItems.length} registro(s).`);
+  }catch(error){console.error(error);showToast("Não foi possível aplicar a alteração em massa.");}
+}
 
 function onlyDigits(value){return String(value||"").replace(/\D/g,"");}
 function openWhatsapp(phone){const digits=onlyDigits(phone);if(!digits){showToast("Informe um número de WhatsApp.");return;}window.open(`https://wa.me/${digits}`,"_blank","noopener,noreferrer");}
@@ -2066,7 +2134,7 @@ function historyStatusCounts(schoolId, record) {
   return counts;
 }
 
-function renderReadOnlyCalendarHalf(schoolId, record, shifts, month, startDay, endDay) {
+function renderHistoryCalendarHalf(schoolId, record, shifts, month, startDay, endDay) {
   const cols = endDay - startDay + 1;
   const headers = [];
   const days = [];
@@ -2077,7 +2145,7 @@ function renderReadOnlyCalendarHalf(schoolId, record, shifts, month, startDay, e
       const info = STATUS_INFO[ch] || STATUS_INFO["?"];
       const reason = record?.r?.[String(day)]?.[shift] || (ch === "X" ? record?.n?.[String(day)] : "") || "";
       const title = `${String(day).padStart(2,"0")}/${month.slice(5,7)}/${month.slice(0,4)} · ${SHIFT_LABELS[shift]} · ${info.label}${reason ? ` · ${reason}` : ""}`;
-      return `<span class="status-chip readonly-status-chip ${info.cls}${reason ? " has-reason" : ""}" title="${escapeHtml(title)}">${shiftCode(shift)}</span>`;
+      return `<button class="status-chip history-status-chip ${info.cls}${reason ? " has-reason" : ""}" type="button" data-edit-status="1" data-school-id="${escapeHtml(schoolId)}" data-day="${day}" data-shift="${shift}" data-status-char="${ch}" data-month="${month}" data-selection-key="${escapeHtml(selectionKey(schoolId,day,shift,month))}" title="${escapeHtml(title)}">${shiftCode(shift)}</button>`;
     }).join("");
     days.push(`<div class="calendar-day">${chips}</div>`);
   }
@@ -2117,7 +2185,7 @@ function renderSchoolHistory() {
     const counts = historyStatusCounts(schoolId, record);
     const ndays = daysInMonth(month);
     const monthMeta = state.months[month] || {};
-    return `<article class="card school-history-month-card"><header class="history-month-head"><div><p class="eyebrow">${escapeHtml(monthMeta.lastSource === "monitora" ? "Monitora" : "Histórico")}</p><h3>${monthLabel(month)}</h3><span>${shifts.length ? shifts.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Sem turnos esperados"}</span></div><div class="history-month-counts"><span><b>${counts.G}</b> frequência</span><span><b>${counts.R}</b> pendente</span><span><b>${counts.J}</b> justificada</span></div></header><div class="school-calendar history-school-calendar">${shifts.length ? renderReadOnlyCalendarHalf(schoolId, record, shifts, month, 1, Math.min(15,ndays)) + (ndays > 15 ? renderReadOnlyCalendarHalf(schoolId, record, shifts, month, 16, ndays) : "") : '<div class="empty-card">Sem turnos esperados.</div>'}</div></article>`;
+    return `<article class="card school-history-month-card"><header class="history-month-head"><div><p class="eyebrow">${escapeHtml(monthMeta.lastSource === "monitora" ? "Monitora" : "Histórico")}</p><h3>${monthLabel(month)}</h3><span>${shifts.length ? shifts.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Sem turnos esperados"}</span></div><div class="history-month-counts"><span><b>${counts.G}</b> frequência</span><span><b>${counts.R}</b> pendente</span><span><b>${counts.J}</b> justificada</span></div></header><div class="school-calendar history-school-calendar">${shifts.length ? renderHistoryCalendarHalf(schoolId, record, shifts, month, 1, Math.min(15,ndays)) + (ndays > 15 ? renderHistoryCalendarHalf(schoolId, record, shifts, month, 16, ndays) : "") : '<div class="empty-card">Sem turnos esperados.</div>'}</div><div class="history-edit-hint">Clique em um turno para editar · segure e arraste sobre pendências vermelhas para selecionar em massa.</div></article>`;
   }).join("");
 }
 
@@ -2154,6 +2222,7 @@ function openSchoolHistory(schoolId) {
 function switchView(view) {
   if ((view === "import" || view === "users") && !isAdmin()) return;
 
+  if ($(".view.active")?.dataset.viewPanel !== view && state.bulkSelection?.size) clearBulkSelection();
   closeCustomSelects();
 
   const current = $(".view.active");
@@ -2200,6 +2269,9 @@ function bindEvents() {
   $("#schoolHistorySelect")?.addEventListener("change",event=>{ state.schoolHistoryId=event.target.value; state.schoolHistoryRecords={}; loadSchoolHistory(state.schoolHistoryId); });
   $("#refreshSchoolHistory")?.addEventListener("click",()=>loadSchoolHistory(state.schoolHistoryId));
   $("#schoolHistoryProfile")?.addEventListener("click",()=>{ if(state.schoolHistoryId) openSchoolProfile(state.schoolHistoryId); });
+  $("#schoolHistoryMonths")?.addEventListener("click",event=>{const button=event.target.closest("[data-edit-status]");if(button){if(Date.now()<state.suppressStatusClickUntil)return;openStatusEditor(button.dataset.schoolId,button.dataset.day,button.dataset.shift,button.dataset.month||state.month);}});
+  $("#schoolHistoryMonths")?.addEventListener("pointerdown",event=>{const button=event.target.closest('.status-chip[data-status-char="R"]');if(button)beginPendingDrag(event,button);});
+  $("#schoolHistoryMonths")?.addEventListener("pointerover",event=>{const button=event.target.closest('.status-chip[data-status-char="R"]');if(button)movePendingDrag(button);});
   $("#schoolSearch")?.addEventListener("input",event=>{
     state.search=event.target.value;
     clearTimeout(monitorSearchTimer);
@@ -2213,7 +2285,7 @@ function bindEvents() {
     const profileButton=event.target.closest("[data-school-profile]");
     if(profileButton){openSchoolProfile(profileButton.dataset.schoolProfile);return;}
     const button=event.target.closest("[data-edit-status]");
-    if(button){if(Date.now()<state.suppressStatusClickUntil)return;openStatusEditor(button.dataset.schoolId,button.dataset.day,button.dataset.shift);}
+    if(button){if(Date.now()<state.suppressStatusClickUntil)return;openStatusEditor(button.dataset.schoolId,button.dataset.day,button.dataset.shift,button.dataset.month||state.month);}
   });
   $("#schoolList")?.addEventListener("pointerdown",event=>{const button=event.target.closest('.status-chip[data-status-char="R"]');if(button)beginPendingDrag(event,button);});
   $("#schoolList")?.addEventListener("pointerover",event=>{const button=event.target.closest('.status-chip[data-status-char="R"]');if(button)movePendingDrag(button);});

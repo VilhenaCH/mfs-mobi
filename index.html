@@ -10,7 +10,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg?v=0.7.1" />
   <link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png?v=0.7.1" />
   <link rel="apple-touch-icon" href="apple-touch-icon.png?v=0.7.1" />
-  <link rel="stylesheet" href="style.css?v=0.8.0" />
+  <link rel="stylesheet" href="style.css?v=0.8.1" />
 </head>
 <body>
   <div class="motion-scene" aria-hidden="true">
@@ -115,7 +115,7 @@
 
       <div class="sidebar-bottom">
         <div class="storage-chip"><span class="pulse-dot"></span><div><strong>Cloud Firestore</strong><small>Sincronização protegida</small></div></div>
-        <div class="version">MFS v0.8.0 · Assistente Supremo</div>
+        <div class="version">MFS v0.8.1 · Assistente Supremo</div>
       </div>
     </aside>
 
@@ -164,23 +164,6 @@
           </div>
           <div id="resultMeta" class="result-meta"></div>
           <div id="schoolList" class="school-list"></div>
-
-          <div class="bulk-action-bar" id="bulkActionBar" hidden>
-            <div class="bulk-summary"><span class="bulk-icon">⌁</span><div><strong id="bulkCount">0 pendências selecionadas</strong><small>Seleção por arraste · somente blocos pendentes</small></div></div>
-            <div class="bulk-controls">
-              <button class="button ghost" id="bulkChargeButton" type="button">Gerar cobrança</button>
-              <select id="bulkStatusSelect" aria-label="Situação em massa">
-                <option value="G">Com frequência</option>
-                <option value="J">Justificada</option>
-                <option value="X">Não letivo</option>
-                <option value="R">Pendente</option>
-                <option value=".">Sem registro</option>
-              </select>
-              <input id="bulkReasonInput" type="text" placeholder="Motivo/observação opcional" />
-              <button class="button primary" id="bulkApplyButton" type="button">Aplicar em massa</button>
-              <button class="bulk-clear" id="bulkClearButton" type="button" aria-label="Limpar seleção">×</button>
-            </div>
-          </div>
         </section>
 
 
@@ -190,9 +173,9 @@
             <div>
               <p class="eyebrow">Visão individual</p>
               <h2>Histórico da escola</h2>
-              <p class="muted">Consulte uma unidade isoladamente e acompanhe todos os meses disponíveis no Firestore.</p>
+              <p class="muted">Consulte e edite uma unidade isoladamente em todos os meses. Clique para ajustar ou arraste pendências para ações em massa.</p>
             </div>
-            <div class="source-badge">Escola · histórico completo</div>
+            <div class="source-badge">Escola · histórico interativo</div>
           </div>
 
           <div class="card school-history-toolbar">
@@ -315,6 +298,23 @@
     </div>
   </div>
 
+  <div class="bulk-action-bar" id="bulkActionBar" hidden>
+            <div class="bulk-summary"><span class="bulk-icon">⌁</span><div><strong id="bulkCount">0 pendências selecionadas</strong><small>Seleção por arraste · somente blocos pendentes</small></div></div>
+            <div class="bulk-controls">
+              <button class="button ghost" id="bulkChargeButton" type="button">Gerar cobrança</button>
+              <select id="bulkStatusSelect" aria-label="Situação em massa">
+                <option value="G">Com frequência</option>
+                <option value="J">Justificada</option>
+                <option value="X">Não letivo</option>
+                <option value="R">Pendente</option>
+                <option value=".">Sem registro</option>
+              </select>
+              <input id="bulkReasonInput" type="text" placeholder="Motivo/observação opcional" />
+              <button class="button primary" id="bulkApplyButton" type="button">Aplicar em massa</button>
+              <button class="bulk-clear" id="bulkClearButton" type="button" aria-label="Limpar seleção">×</button>
+            </div>
+          </div>
+
   <div class="modal-backdrop" id="statusModal" aria-hidden="true">
     <div class="status-modal" role="dialog" aria-modal="true" aria-labelledby="editorTitle">
       <div class="modal-accent"></div>
@@ -361,7 +361,7 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="firebase-config.js?v=0.8.0"></script>
-  <script type="module" src="app.js?v=0.8.0"></script>
+  <script src="firebase-config.js?v=0.8.1"></script>
+  <script type="module" src="app.js?v=0.8.1"></script>
 </body>
 </html>

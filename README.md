@@ -1,16 +1,17 @@
-# MFS v0.8.0 — Turnos esperados e histórico individual
+# MFS v0.8.1 — Histórico individual interativo
+
+Esta versão transforma a aba **Escola** em uma área operacional, não apenas de consulta.
 
 ## Novidades
 
-- O CSV diário passa a definir a grade de **turnos esperados** por escola.
-- Cada CSV é autoritativo para o turno selecionado: escolas presentes passam a esperar o turno; escolas ausentes deixam de esperá-lo.
-- O histórico bruto do Monitora continua preservado no Firestore; apenas a exibição e as cobranças obedecem aos turnos esperados.
-- A abertura automática do dia cria pendências somente nos turnos esperados.
-- Nova aba **Escola** para consultar uma unidade isoladamente e visualizar todos os meses disponíveis.
-- Cada card do acompanhamento ganhou botão **Histórico**.
+- Clique em M/T/N/I no histórico individual para editar aquele dia/turno.
+- Segure e arraste por pendências vermelhas para selecionar em massa.
+- A seleção pode atravessar dias e meses diferentes da mesma escola.
+- A barra de ações em massa agora é global e aparece tanto no Acompanhamento quanto na aba Escola.
+- Alteração em massa grava cada mês correto no Firestore e registra auditoria com os meses afetados.
+- Cobrança gerada pela seleção também funciona com datas de meses diferentes.
+- Navegar para outra área limpa qualquer seleção pendente para evitar ações acidentais.
 
-## Importante
+## Firebase
 
-Esta versão altera `firestore.rules`, pois técnicos autorizados precisam poder atualizar somente os campos controlados de grade esperada no documento da escola. Publique as novas Rules no Firebase Console.
-
-Na primeira utilização da v0.8.0, a grade vai sendo saneada turno a turno conforme os CSVs são importados. Depois que os CSVs de Manhã, Integral, Tarde e Noite forem processados ao menos uma vez, o cadastro de turnos esperados estará completamente definido pelo fluxo diário.
+Não há novas coleções nem mudança obrigatória nas Firestore Rules em relação à v0.8.0.
