@@ -7,9 +7,20 @@
   <meta name="description" content="MFS - Monitoramento de Frequência Supremo, Mobieduca.me" />
   <meta name="robots" content="noindex,nofollow,noarchive" />
   <title>MFS · Monitoramento de Frequência Supremo</title>
-  <link rel="stylesheet" href="style.css?v=0.6.0" />
+  <link rel="icon" type="image/svg+xml" href="favicon.svg?v=0.7.0" />
+  <link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png?v=0.7.0" />
+  <link rel="apple-touch-icon" href="apple-touch-icon.png?v=0.7.0" />
+  <link rel="stylesheet" href="style.css?v=0.7.0" />
 </head>
 <body>
+  <div class="motion-scene" aria-hidden="true">
+    <div class="motion-grid"></div>
+    <div class="motion-beam beam-a"></div>
+    <div class="motion-beam beam-b"></div>
+    <div class="motion-orb orb-a"></div>
+    <div class="motion-orb orb-b"></div>
+    <div class="motion-orb orb-c"></div>
+  </div>
   <div class="ambient ambient-a"></div>
   <div class="ambient ambient-b"></div>
 
@@ -100,7 +111,7 @@
 
       <div class="sidebar-bottom">
         <div class="storage-chip"><span class="pulse-dot"></span><div><strong>Cloud Firestore</strong><small>Sincronização protegida</small></div></div>
-        <div class="version">MFS v0.6.0 · Assistente Supremo</div>
+        <div class="version">MFS v0.7.0 · Assistente Supremo</div>
       </div>
     </aside>
 
@@ -179,7 +190,7 @@
             </article>
             <article class="card preview-card"><div class="card-title-row"><div><p class="eyebrow">Validação</p><h3 id="dailyPreviewTitle">Nenhum arquivo selecionado</h3></div><span class="step-badge">02</span></div><div id="dailyPreview" class="empty-preview"><div class="preview-icon">CSV</div><strong>Aguardando arquivo</strong><span>Confira o resultado antes de gravar.</span></div></article>
           </div>
-          <section class="card charge-card"><div class="charge-head"><div><p class="eyebrow">Cobrança diária</p><h3 id="chargeTitle">Pendências do dia</h3><p class="muted" id="chargeSubtitle">Importe os turnos para consolidar as cobranças.</p></div><button class="button ghost" id="copyAllCharges" type="button" disabled>Copiar todas</button></div><div id="chargeList" class="charge-list"><div class="empty-preview small-empty"><strong>Nenhuma cobrança carregada</strong><span>As escolas pendentes aparecerão aqui.</span></div></div></section>
+          <section class="card charge-card"><div class="charge-head"><div><p class="eyebrow">Cobrança diária</p><h3 id="chargeTitle">Pendências do dia</h3><p class="muted" id="chargeSubtitle">Importe os turnos para consolidar as cobranças.</p></div><div class="charge-actions"><div class="view-switch" role="group" aria-label="Modo de visualização das cobranças"><button class="view-switch-button active" type="button" data-charge-view="cards" title="Visualizar em cards">▦ <span>Cards</span></button><button class="view-switch-button" type="button" data-charge-view="list" title="Visualizar em lista">☷ <span>Lista</span></button></div><button class="button ghost" id="copyAllCharges" type="button" disabled>Copiar todas</button></div></div><div id="chargeList" class="charge-list charge-view-cards"><div class="empty-preview small-empty"><strong>Nenhuma cobrança carregada</strong><span>As escolas pendentes aparecerão aqui.</span></div></div></section>
         </section>
 
 
@@ -315,7 +326,7 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="firebase-config.js?v=0.5.1"></script>
-  <script type="module" src="app.js?v=0.6.0"></script>
+  <script src="firebase-config.js?v=0.7.0"></script>
+  <script type="module" src="app.js?v=0.7.0"></script>
 </body>
 </html>

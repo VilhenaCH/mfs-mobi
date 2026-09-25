@@ -66,6 +66,7 @@ const state = {
   preview: null,
   dailyPreview: null,
   chargeGroups: [],
+  chargeView: sessionStorage.getItem("mfs-charge-view") || "cards",
   editor: null,
   bulkSelection: new Map(),
   dragSelection: null,
@@ -84,6 +85,11 @@ const state = {
   clockTimer: null,
   assistantRefreshTimer: null,
   alertTimer: null,
+  dayWatchTimer: null,
+  autoPendingBusy: false,
+  lastAutoPendingDate: null,
+  lastAutoPendingSchoolCount: 0,
+  autoPendingDebounce: null,
   unsubSchools: null,
   unsubMonths: null,
   unsubMonthRecords: null
@@ -138,6 +144,118 @@ function showToast(message) {
   toast.classList.add("show");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => toast.classList.remove("show"), 3000);
+}
+
+
+function closeCustomSelects(except = null) {
+  $$(".mfs-select.open").forEach(wrapper => {
+    if (wrapper !== except) wrapper.classList.remove("open");
+  });
+}
+
+function enhanceSelect(select) {
+  if (!select || select.multiple) return;
+
+  if (select.dataset.mfsSelect === "1") {
+    select._mfsRefresh?.();
+    return;
+  }
+
+  select.dataset.mfsSelect = "1";
+  const wrapper = document.createElement("div");
+  wrapper.className = "mfs-select";
+  select.parentNode.insertBefore(wrapper, select);
+  wrapper.appendChild(select);
+  select.classList.add("mfs-native-select");
+
+  const trigger = document.createElement("button");
+  trigger.type = "button";
+  trigger.className = "mfs-select-trigger";
+  trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.innerHTML = '<span class="mfs-select-value"></span><span class="mfs-select-chevron">⌄</span>';
+
+  const menu = document.createElement("div");
+  menu.className = "mfs-select-menu";
+  menu.setAttribute("role", "listbox");
+
+  wrapper.append(trigger, menu);
+
+  const refresh = () => {
+    const selected = select.options[select.selectedIndex] || select.options[0];
+    trigger.querySelector(".mfs-select-value").textContent = selected?.textContent?.trim() || "Selecionar";
+    trigger.disabled = select.disabled;
+    wrapper.classList.toggle("disabled", select.disabled);
+    menu.innerHTML = [...select.options].map(option => `
+      <button type="button" class="mfs-select-option ${option.selected ? "selected" : ""}" role="option"
+        data-value="${escapeHtml(option.value)}" aria-selected="${option.selected ? "true" : "false"}" ${option.disabled ? "disabled" : ""}>
+        <span>${escapeHtml(option.textContent.trim())}</span>${option.selected ? '<i>✓</i>' : ''}
+      </button>`).join("");
+  };
+
+  select._mfsRefresh = refresh;
+  refresh();
+
+  trigger.addEventListener("click", event => {
+    event.stopPropagation();
+    if (select.disabled) return;
+    const opening = !wrapper.classList.contains("open");
+    closeCustomSelects(wrapper);
+    wrapper.classList.toggle("open", opening);
+  });
+
+  menu.addEventListener("click", event => {
+    const optionButton = event.target.closest(".mfs-select-option");
+    if (!optionButton || optionButton.disabled) return;
+    select.value = optionButton.dataset.value;
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    refresh();
+    wrapper.classList.remove("open");
+  });
+
+  select.addEventListener("change", refresh);
+}
+
+function enhanceAllSelects(root = document) {
+  $$("select", root).forEach(enhanceSelect);
+}
+
+function syncCustomSelect(select) {
+  select?._mfsRefresh?.();
+}
+
+function initCustomSelectSystem() {
+  enhanceAllSelects();
+  document.addEventListener("click", () => closeCustomSelects());
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") closeCustomSelects();
+  });
+
+  const observer = new MutationObserver(() => requestAnimationFrame(() => enhanceAllSelects()));
+  observer.observe(document.body, { childList: true, subtree: true });
+}
+
+function initMotionInteractions() {
+  document.addEventListener("pointerdown", event => {
+    const target = event.target.closest(".button,.mini-button,.quick-action,.nav-button,.view-switch-button,.assistant-top-button,.google-login-button,.status-chip");
+    if (!target || target.disabled) return;
+    const rect = target.getBoundingClientRect();
+    const ripple = document.createElement("span");
+    ripple.className = "mfs-ripple";
+    ripple.style.left = `${event.clientX - rect.left}px`;
+    ripple.style.top = `${event.clientY - rect.top}px`;
+    target.appendChild(ripple);
+    ripple.addEventListener("animationend", () => ripple.remove(), { once: true });
+  });
+}
+
+function statusBadgeHtml(char, compact = false) {
+  const info = STATUS_INFO[char] || STATUS_INFO["?"];
+  return `<span class="transition-status ${info.cls} ${compact ? "compact" : ""}">${escapeHtml(info.label)}</span>`;
+}
+
+function changeBadgeHtml(before, after) {
+  const same = before === after;
+  return `<span class="transition-change ${same ? "same" : "changed"}">${same ? "Sem mudança" : "Atualiza"}</span>`;
 }
 
 function localISODate(date = new Date()) {
@@ -268,10 +386,12 @@ function cleanupSubscriptions() {
     if (typeof state[key] === "function") state[key]();
     state[key] = null;
   }
-  for (const timerKey of ["clockTimer","assistantRefreshTimer","alertTimer"]) {
+  for (const timerKey of ["clockTimer","assistantRefreshTimer","alertTimer","dayWatchTimer"]) {
     if (state[timerKey]) clearInterval(state[timerKey]);
     state[timerKey] = null;
   }
+  if (state.autoPendingDebounce) clearTimeout(state.autoPendingDebounce);
+  state.autoPendingDebounce = null;
   state.vaultPassphrase = null;
 }
 
@@ -295,7 +415,9 @@ function enterAuthorizedApp() {
   subscribeMonthRecords(state.month);
   renderCharges($("#dailyDate")?.value);
   if (isAdmin()) loadUserManagement();
+  enhanceAllSelects();
   startAssistantEngine();
+  scheduleTodayPendingSync(900);
 }
 
 function subscribeSchools() {
@@ -304,6 +426,7 @@ function subscribeSchools() {
     snapshot.forEach(snap => { schools[snap.id] = { id: snap.id, ...snap.data() }; });
     state.schools = schools;
     renderMonitor();
+    scheduleTodayPendingSync(500);
   }, error => {
     console.error(error);
     showToast("Falha ao carregar as escolas do Firestore.");
@@ -329,6 +452,7 @@ function subscribeMonthRecords(month) {
     snapshot.forEach(snap => records[snap.id] = snap.data());
     state.records = records;
     renderMonitor();
+    scheduleTodayPendingSync(500);
     if ($("#dailyDate")?.value?.startsWith(month)) renderCharges($("#dailyDate").value);
   }, error => {
     console.error(error);
@@ -355,6 +479,8 @@ function renderMonthSelect() {
   if (!select) return;
   const months = availableMonths();
   select.innerHTML = months.slice().reverse().map(m => `<option value="${m}" ${m === state.month ? "selected" : ""}>${monthLabel(m)}</option>`).join("");
+  enhanceSelect(select);
+  syncCustomSelect(select);
 }
 
 function countStatuses(records, shiftFilter = "TODOS") {
@@ -425,6 +551,9 @@ function renderMonitor() {
   $("#monthSelect").value = state.month;
   $("#shiftFilter").value = state.shift;
   $("#statusFilter").value = state.status;
+  syncCustomSelect($("#monthSelect"));
+  syncCustomSelect($("#shiftFilter"));
+  syncCustomSelect($("#statusFilter"));
   renderSummary();
 
   const filtered = Object.entries(state.records)
@@ -462,7 +591,9 @@ function renderCalendarHalf(id, record, shifts, month, startDay, endDay) {
   const headers = [];
   const days = [];
   for (let day = startDay; day <= endDay; day++) {
-    headers.push(`<div class="calendar-day-head"><span>${weekdayShort(month, day)}</span><strong>${String(day).padStart(2,"0")}</strong></div>`);
+    const todayKey = localISODate();
+    const isToday = month === todayKey.slice(0,7) && day === Number(todayKey.slice(-2));
+    headers.push(`<div class="calendar-day-head ${isToday ? "today-column" : ""}"><span>${weekdayShort(month, day)}</span><strong>${String(day).padStart(2,"0")}</strong>${isToday ? '<i class="today-dot"></i>' : ''}</div>`);
     const chips = shifts.map(shift => {
       const ch = statusChar(record, shift, day);
       const info = STATUS_INFO[ch] || STATUS_INFO["?"];
@@ -470,7 +601,7 @@ function renderCalendarHalf(id, record, shifts, month, startDay, endDay) {
       const title = `${String(day).padStart(2,"0")}/${month.slice(5,7)}/${month.slice(0,4)} · ${SHIFT_LABELS[shift]} · ${info.label}${reason ? ` · ${reason}` : ""}`;
       return `<button class="status-chip ${info.cls}${reason ? " has-reason" : ""}" type="button" data-edit-status="1" data-school-id="${escapeHtml(id)}" data-day="${day}" data-shift="${shift}" data-status-char="${ch}" data-selection-key="${escapeHtml(`${id}|${day}|${shift}`)}" title="${escapeHtml(title)}">${shiftCode(shift)}</button>`;
     }).join("");
-    days.push(`<div class="calendar-day">${chips}</div>`);
+    days.push(`<div class="calendar-day ${isToday ? "today-column" : ""}">${chips}</div>`);
   }
   return `<div class="calendar-half"><div class="calendar-body"><div class="calendar-header" style="--cols:${cols}">${headers.join("")}</div><div class="calendar-grid" style="--cols:${cols}">${days.join("")}</div></div></div>`;
 }
@@ -498,6 +629,7 @@ function openStatusEditor(schoolId, day, shift) {
   $("#editorDate").textContent = `${String(day).padStart(2,"0")}/${state.month.slice(5,7)}/${state.month.slice(0,4)}`;
   $("#editorShift").textContent = SHIFT_LABELS[shift] || shift;
   $("#editorStatus").value = ["G","R","J","X","."].includes(ch) ? ch : ".";
+  syncCustomSelect($("#editorStatus"));
   $("#editorReason").value = reason;
   updateEditorHint();
   $("#statusModal").classList.add("open");
@@ -709,13 +841,64 @@ function diffImport(parsed, currentRecords) {
   return {changes,resolved,newPending,newJustified,newFrequency,currentSchools:Object.keys(currentRecords).length};
 }
 
+function buildImportTransitionRows(parsed, currentRecords) {
+  const rows = [];
+  const ndays = daysInMonth(parsed.month);
+  Object.entries(parsed.records).forEach(([id, next]) => {
+    const prev = currentRecords[id] || { s: {} };
+    const meta = parsed.schoolsMeta[id] || state.schools[id] || { name: id };
+    const shifts = recordShifts(next);
+    shifts.forEach(shift => {
+      for (let day = 1; day <= ndays; day++) {
+        const before = statusChar(prev, shift, day);
+        const after = statusChar(next, shift, day);
+        const reason = next?.r?.[String(day)]?.[shift] || (after === "X" ? next?.n?.[String(day)] : "") || "";
+        rows.push({ id, schoolName: meta.name || id, day, shift, before, after, reason });
+      }
+    });
+  });
+  return rows;
+}
+
 function renderImportPreview(parsed, currentRecords) {
   const counts = importCounts(parsed.records);
   const diff = diffImport(parsed,currentRecords);
   const schoolCount = Object.keys(parsed.records).length;
+  const transitions = buildImportTransitionRows(parsed, currentRecords);
+  const changed = transitions.filter(row => row.before !== row.after).length;
+  const same = transitions.length - changed;
   $("#previewTitle").textContent = `${parsed.fileName} · ${monthLabel(parsed.month)}`;
   $("#importPreview").className = "";
-  $("#importPreview").innerHTML = `<div class="preview-grid"><div class="preview-stat"><strong>${schoolCount}</strong><span>escolas encontradas</span></div><div class="preview-stat"><strong>${counts.R || 0}</strong><span>pendências</span></div><div class="preview-stat"><strong>${counts.G || 0}</strong><span>com frequência</span></div><div class="preview-stat"><strong>${counts.J || 0}</strong><span>justificadas</span></div></div><div class="diff-list"><div class="diff-row"><span>Alterações em relação ao Firestore</span><strong>${diff.changes}</strong></div><div class="diff-row"><span>Pendências regularizadas</span><strong>${diff.resolved}</strong></div><div class="diff-row"><span>Novas pendências</span><strong>${diff.newPending}</strong></div><div class="diff-row"><span>Novas justificativas</span><strong>${diff.newJustified}</strong></div><div class="diff-row"><span>Novos registros com frequência</span><strong>${diff.newFrequency}</strong></div></div>${schoolCount < diff.currentSchools ? `<div class="import-warning">Somente as ${schoolCount} escolas encontradas no HTML serão substituídas. As demais permanecem no banco.</div>` : ""}`;
+  $("#importPreview").innerHTML = `
+    <div class="preview-grid">
+      <div class="preview-stat"><strong>${schoolCount}</strong><span>escolas encontradas</span></div>
+      <div class="preview-stat"><strong>${counts.R || 0}</strong><span>pendências no arquivo</span></div>
+      <div class="preview-stat"><strong>${changed}</strong><span>situações que mudam</span></div>
+      <div class="preview-stat"><strong>${same}</strong><span>situações mantidas</span></div>
+    </div>
+    <div class="diff-list">
+      <div class="diff-row"><span>Pendências regularizadas</span><strong>${diff.resolved}</strong></div>
+      <div class="diff-row"><span>Novas pendências</span><strong>${diff.newPending}</strong></div>
+      <div class="diff-row"><span>Novas justificativas</span><strong>${diff.newJustified}</strong></div>
+      <div class="diff-row"><span>Novos registros com frequência</span><strong>${diff.newFrequency}</strong></div>
+    </div>
+    ${schoolCount < diff.currentSchools ? `<div class="import-warning">Somente as ${schoolCount} escolas encontradas no HTML serão substituídas. As demais permanecem no banco.</div>` : ""}
+    <div class="transition-head"><div><strong>Antes → depois</strong><span>Todas as situações que o HTML vai gravar, inclusive quando nada muda.</span></div><span class="transition-total">${transitions.length} registros</span></div>
+    <div class="transition-table-wrap">
+      <table class="transition-table">
+        <thead><tr><th>Escola</th><th>Data</th><th>Turno</th><th>Situação atual</th><th></th><th>Após importar</th><th>Resultado</th><th>Motivo</th></tr></thead>
+        <tbody>${transitions.map(row => `<tr class="${row.before === row.after ? "same-row" : "changed-row"}">
+          <td><strong>${escapeHtml(row.schoolName)}</strong></td>
+          <td>${String(row.day).padStart(2,"0")}/${parsed.month.slice(5,7)}</td>
+          <td>${escapeHtml(SHIFT_LABELS[row.shift] || row.shift)}</td>
+          <td>${statusBadgeHtml(row.before, true)}</td>
+          <td class="transition-arrow">→</td>
+          <td>${statusBadgeHtml(row.after, true)}</td>
+          <td>${changeBadgeHtml(row.before,row.after)}</td>
+          <td class="transition-reason">${escapeHtml(row.reason || "—")}</td>
+        </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
 }
 
 function processFile(file) {
@@ -778,6 +961,7 @@ async function applyImport() {
         {
           ...meta,
           active: true,
+          shifts: recordShifts(parsed.records[id] || { s: {} }),
           updatedAt: serverTimestamp(),
           updatedBy: state.user.uid
         },
@@ -921,6 +1105,7 @@ async function buildDailyPreview(fileName, rows) {
   const shift=$("#dailyShift").value;
   if (!date) throw new Error("Selecione a data antes do CSV.");
   const month=date.slice(0,7);
+  const day=Number(date.slice(-2));
   const existingRecords=await getMonthRecordsOnce(month);
   const mapped=rows.map(row=>{
     const schoolName=row.escola||row.nomeescola||row.unidade||row.unidadeescolar||"";
@@ -928,9 +1113,11 @@ async function buildDailyPreview(fileName, rows) {
     const area=row.gerencia||row.gre||row.polo||"";
     const frequency=csvFrequencyStatus(row.frequencia||row.status||row.situacao||"");
     const match=findSchoolByCSVName(schoolName);
-    return { schoolName,director,area,frequency,turmas:row.turmas||row.qtdturmas||row.quantidadeturmas||"",alunos:row.alunos||row.qtdalunos||row.quantidadealunos||"",id:match?.id||null,meta:match?.meta||null,matchConfidence:match?.confidence||"nao_reconhecida" };
+    const beforeChar=match?.id ? statusChar(existingRecords[match.id],shift,day) : "?";
+    const afterChar=frequency==="enviada"?"G":frequency==="nao_enviada"?"R":"?";
+    return { schoolName,director,area,frequency,beforeChar,afterChar,turmas:row.turmas||row.qtdturmas||row.quantidadeturmas||"",alunos:row.alunos||row.qtdalunos||row.quantidadealunos||"",id:match?.id||null,meta:match?.meta||null,matchConfidence:match?.confidence||"nao_reconhecida" };
   }).filter(row=>row.schoolName);
-  const summary={ total:mapped.length, sent:mapped.filter(r=>r.frequency==="enviada").length, pending:mapped.filter(r=>r.frequency==="nao_enviada").length, unknownStatus:mapped.filter(r=>r.frequency==="desconhecida").length, unknownSchools:mapped.filter(r=>!r.id).length };
+  const summary={ total:mapped.length, sent:mapped.filter(r=>r.frequency==="enviada").length, pending:mapped.filter(r=>r.frequency==="nao_enviada").length, unknownStatus:mapped.filter(r=>r.frequency==="desconhecida").length, unknownSchools:mapped.filter(r=>!r.id).length, changed:mapped.filter(r=>r.id&&r.afterChar!=="?"&&r.beforeChar!==r.afterChar).length, same:mapped.filter(r=>r.id&&r.afterChar!=="?"&&r.beforeChar===r.afterChar).length };
   return {fileName,date,shift,month,rows:mapped,summary,existingRecords};
 }
 
@@ -938,7 +1125,29 @@ function renderDailyPreview(parsed) {
   const {summary}=parsed;
   $("#dailyPreviewTitle").textContent=`${parsed.fileName} · ${formatDateBR(parsed.date)} · ${SHIFT_LABELS[parsed.shift]}`;
   $("#dailyPreview").className="";
-  $("#dailyPreview").innerHTML=`<div class="preview-grid"><div class="preview-stat"><strong>${summary.total}</strong><span>escolas no CSV</span></div><div class="preview-stat"><strong>${summary.sent}</strong><span>com frequência</span></div><div class="preview-stat"><strong>${summary.pending}</strong><span>para cobrar</span></div><div class="preview-stat"><strong>${summary.unknownSchools}</strong><span>não reconhecidas</span></div></div>${summary.unknownStatus?`<div class="import-warning compact-warning">${summary.unknownStatus} registro(s) têm situação não reconhecida e serão ignorados.</div>`:""}${summary.unknownSchools?`<div class="import-warning compact-warning">${summary.unknownSchools} escola(s) não existem no cadastro protegido. Importe primeiro o HTML do Monitora como administrador.</div>`:""}<div class="csv-table-wrap"><table class="csv-table"><thead><tr><th>Escola</th><th>Situação</th><th>Gerência</th><th>Turmas</th><th>Alunos</th></tr></thead><tbody>${parsed.rows.map(row=>{const cls=row.frequency==="enviada"?"sent":row.frequency==="nao_enviada"?"pending":"unknown";const label=row.frequency==="enviada"?"Enviada":row.frequency==="nao_enviada"?"Não enviada":"Revisar";return `<tr><td><strong>${escapeHtml(row.schoolName)}</strong>${!row.id?`<br><small class="muted">não reconhecida</small>`:""}</td><td><span class="csv-status ${cls}">${label}</span></td><td>${escapeHtml(row.area)}</td><td>${escapeHtml(row.turmas)}</td><td>${escapeHtml(row.alunos)}</td></tr>`;}).join("")}</tbody></table></div>`;
+  $("#dailyPreview").innerHTML=`
+    <div class="preview-grid">
+      <div class="preview-stat"><strong>${summary.total}</strong><span>escolas no CSV</span></div>
+      <div class="preview-stat"><strong>${summary.sent}</strong><span>com frequência</span></div>
+      <div class="preview-stat"><strong>${summary.changed}</strong><span>situações que mudam</span></div>
+      <div class="preview-stat"><strong>${summary.same}</strong><span>situações mantidas</span></div>
+    </div>
+    ${summary.unknownStatus?`<div class="import-warning compact-warning">${summary.unknownStatus} registro(s) têm situação não reconhecida e serão ignorados.</div>`:""}
+    ${summary.unknownSchools?`<div class="import-warning compact-warning">${summary.unknownSchools} escola(s) não existem no cadastro protegido. Importe primeiro o HTML do Monitora como administrador.</div>`:""}
+    <div class="transition-head compact-transition-head"><div><strong>Situação atual → situação após importar</strong><span>Mesmo quando o CSV mantém o mesmo status, a comparação aparece abaixo.</span></div></div>
+    <div class="csv-table-wrap transition-table-wrap daily-transition-wrap">
+      <table class="csv-table transition-table">
+        <thead><tr><th>Escola</th><th>Atual</th><th></th><th>Após importar</th><th>Resultado</th><th>Gerência</th><th>Turmas</th><th>Alunos</th></tr></thead>
+        <tbody>${parsed.rows.map(row=>`<tr class="${row.beforeChar===row.afterChar?"same-row":"changed-row"}">
+          <td><strong>${escapeHtml(row.schoolName)}</strong>${!row.id?`<br><small class="muted">não reconhecida</small>`:""}</td>
+          <td>${row.id?statusBadgeHtml(row.beforeChar,true):'<span class="transition-status blank compact">Não cadastrada</span>'}</td>
+          <td class="transition-arrow">→</td>
+          <td>${row.afterChar!=="?"?statusBadgeHtml(row.afterChar,true):'<span class="transition-status blank compact">Revisar</span>'}</td>
+          <td>${row.id&&row.afterChar!=="?"?changeBadgeHtml(row.beforeChar,row.afterChar):'<span class="transition-change same">Ignora</span>'}</td>
+          <td>${escapeHtml(row.area)}</td><td>${escapeHtml(row.turmas)}</td><td>${escapeHtml(row.alunos)}</td>
+        </tr>`).join("")}</tbody>
+      </table>
+    </div>`;
 }
 
 function processDailyFile(file) {
@@ -1105,18 +1314,20 @@ async function buildChargeGroups(date) {
   const runs={};
   runSnaps.forEach((snap,i)=>{if(snap.exists()) runs[SHIFT_ORDER[i]]=snap.data();});
   const importedShifts=Object.keys(runs);
-  if (!importedShifts.length) return {groups:[],importedShifts:[]};
   const records=month===state.month?state.records:await getMonthRecordsOnce(month);
   const groups=new Map();
+
   Object.entries(records).forEach(([id,record])=>{
-    importedShifts.forEach(shift=>{
-      if (!(runs[shift].schoolIds||[]).includes(id)) return;
+    recordShifts(record).forEach(shift=>{
       if (statusChar(record,shift,day)!=="R") return;
       const meta=state.schools[id]||{};
-      if(!groups.has(id)) groups.set(id,{id,schoolName:meta.name||id,area:meta.area||"",shifts:[]});
-      const group=groups.get(id); if(!group.shifts.includes(shift)) group.shifts.push(shift);
+      if(!groups.has(id)) groups.set(id,{id,schoolName:meta.name||id,area:meta.area||"",shifts:[],importedShifts:[]});
+      const group=groups.get(id);
+      if(!group.shifts.includes(shift)) group.shifts.push(shift);
+      if(runs[shift] && (runs[shift].schoolIds||[]).includes(id) && !group.importedShifts.includes(shift)) group.importedShifts.push(shift);
     });
   });
+
   return {groups:[...groups.values()].sort((a,b)=>a.schoolName.localeCompare(b.schoolName,"pt-BR")),importedShifts};
 }
 
@@ -1154,9 +1365,24 @@ async function renderCharges(date=$("#dailyDate")?.value) {
     const {groups,importedShifts}=await buildChargeGroups(date);
     state.chargeGroups=groups;
     $("#chargeTitle").textContent=`Pendências de ${formatDateBR(date)}`;
-    $("#chargeSubtitle").textContent=importedShifts.length?`Turnos importados: ${importedShifts.map(s=>SHIFT_LABELS[s]).join(", ")}. ${groups.length} escola(s) aguardando regularização.`:"Importe os turnos do dia para consolidar as cobranças.";
+    $("#chargeSubtitle").textContent=importedShifts.length?`CSV recebido em: ${importedShifts.map(s=>SHIFT_LABELS[s]).join(", ")}. ${groups.length} escola(s) continuam pendentes no dia.`:`${groups.length} escola(s) pendentes pela abertura automática do dia. Você já pode visualizar ou copiar cobranças antes do CSV.`;
     $("#copyAllCharges").disabled=!groups.length;
-    $("#chargeList").innerHTML=groups.length?groups.map((group,index)=>`<article class="charge-item"><div><h3>${escapeHtml(group.schoolName)}</h3><p>${escapeHtml(group.area||"")}</p></div><div class="charge-shifts">${group.shifts.map(shift=>`<span class="charge-shift">${SHIFT_LABELS[shift]}</span>`).join("")}</div><button class="charge-copy" type="button" data-charge-index="${index}">Copiar mensagem</button></article>`).join(""):`<div class="empty-preview small-empty"><strong>Sem pendências nos turnos importados</strong><span>Nenhuma escola permanece marcada como não enviada.</span></div>`;
+
+    $$('[data-charge-view]').forEach(button=>button.classList.toggle("active",button.dataset.chargeView===state.chargeView));
+    const list=$("#chargeList");
+    list.className=`charge-list charge-view-${state.chargeView}`;
+
+    if (!groups.length) {
+      list.innerHTML=`<div class="empty-preview small-empty"><strong>Sem pendências nos turnos importados</strong><span>Nenhuma escola permanece marcada como não enviada.</span></div>`;
+      return;
+    }
+
+    if (state.chargeView === "list") {
+      list.innerHTML=`<div class="charge-table-wrap"><table class="charge-table"><thead><tr><th>Escola</th><th>Área/GRE</th><th>Turnos pendentes</th><th></th></tr></thead><tbody>${groups.map((group,index)=>`<tr><td><strong>${escapeHtml(group.schoolName)}</strong></td><td>${escapeHtml(group.area||"—")}</td><td><div class="charge-shifts">${group.shifts.map(shift=>`<span class="charge-shift">${SHIFT_LABELS[shift]}</span>`).join("")}</div></td><td><button class="charge-copy" type="button" data-charge-index="${index}">Copiar mensagem</button></td></tr>`).join("")}</tbody></table></div>`;
+    } else {
+      list.innerHTML=groups.map((group,index)=>`<article class="charge-item charge-card-item"><div class="charge-card-icon">!</div><div class="charge-card-copy"><h3>${escapeHtml(group.schoolName)}</h3><p>${escapeHtml(group.area||"")}</p><div class="charge-shifts">${group.shifts.map(shift=>`<span class="charge-shift">${SHIFT_LABELS[shift]}</span>`).join("")}</div></div><button class="charge-copy" type="button" data-charge-index="${index}">Copiar mensagem</button></article>`).join("");
+    }
+
     $$('[data-charge-index]').forEach(button=>button.addEventListener('click',()=>{const group=state.chargeGroups[Number(button.dataset.chargeIndex)];if(group)copyText(chargeMessage(group,date));}));
   } catch(error) { console.error(error); }
 }
@@ -1180,6 +1406,117 @@ function hhmmToMinutes(value) { const [h,m] = value.split(":").map(Number); retu
 function formatClock(date = new Date()) { return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`; }
 function formatLongDate(date = new Date()) { return new Intl.DateTimeFormat("pt-BR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"}).format(date); }
 
+
+function previousMonthKey(month) {
+  const [year, mo] = month.split("-").map(Number);
+  const date = new Date(year, mo - 2, 1);
+  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}`;
+}
+
+async function getMonthRecordsFresh(month) {
+  const snapshot = await getDocs(collection(db,"months",month,"schools"));
+  const records = {};
+  snapshot.forEach(snap => records[snap.id] = snap.data());
+  return records;
+}
+
+function scheduleTodayPendingSync(delay = 250) {
+  if (!state.user || !state.profile || !db) return;
+  if (state.autoPendingDebounce) clearTimeout(state.autoPendingDebounce);
+  state.autoPendingDebounce = setTimeout(() => {
+    state.autoPendingDebounce = null;
+    ensureTodayPending().catch(error => console.error("Falha ao abrir pendências automáticas do dia:", error));
+  }, delay);
+}
+
+async function ensureTodayPending() {
+  if (!state.user || !state.profile || state.autoPendingBusy) return;
+  const today = localISODate();
+  const month = today.slice(0,7);
+  const day = Number(today.slice(-2));
+  const dateObj = new Date(`${today}T12:00:00`);
+  const weekend = [0,6].includes(dateObj.getDay());
+  const currentSchoolCount = Object.keys(state.schools).length;
+  if (state.lastAutoPendingDate === today && state.lastAutoPendingSchoolCount === currentSchoolCount) return;
+
+  state.autoPendingBusy = true;
+  try {
+    if (!Object.keys(state.schools).length) return;
+
+    const currentRecords = await getMonthRecordsFresh(month);
+    let previousRecords = {};
+    const needsPrevious = Object.keys(state.schools).some(id => {
+      const current = currentRecords[id];
+      const stored = Array.isArray(state.schools[id]?.shifts) ? state.schools[id].shifts : [];
+      return !recordShifts(current).length && !stored.length;
+    });
+    if (needsPrevious) previousRecords = await getMonthRecordsFresh(previousMonthKey(month));
+
+    const operations = [];
+    let changedCount = 0;
+    let schoolCount = 0;
+
+    Object.entries(state.schools).forEach(([schoolId, meta]) => {
+      if (meta?.active === false) return;
+      const existed = Boolean(currentRecords[schoolId]);
+      const current = clone(currentRecords[schoolId] || { s:{}, r:{}, n:{} });
+      if (current?.n?.[String(day)]) return;
+
+      let shifts = recordShifts(current);
+      if (!shifts.length && Array.isArray(meta?.shifts)) shifts = meta.shifts.filter(shift => SHIFT_ORDER.includes(shift));
+      if (!shifts.length) shifts = recordShifts(previousRecords[schoolId]);
+      if (!shifts.length) return;
+
+      // Sem um calendário mensal já criado, não presumimos sábado/domingo.
+      // Se o Monitora já trouxe o mês, os X de não-letivo são respeitados normalmente.
+      if (!existed && weekend) return;
+
+      let changed = false;
+      shifts.forEach(shift => {
+        const currentStatus = statusChar(current, shift, day);
+        if (currentStatus !== ".") return;
+        setStatusChar(current, shift, day, "R", month);
+        changed = true;
+        changedCount += 1;
+      });
+
+      if (!changed) return;
+      schoolCount += 1;
+      operations.push(batch => batch.set(doc(db,"months",month,"schools",schoolId),{
+        schoolId,
+        month,
+        s:current.s || {},
+        source:"auto_day_open",
+        autoPendingDate:today,
+        updatedAt:serverTimestamp(),
+        updatedBy:state.user.uid
+      },{merge:true}));
+    });
+
+    if (operations.length) {
+      await commitWriteOperationsInChunks(operations);
+      await setDoc(doc(db,"months",month),{
+        label:monthLabel(month),
+        lastSource:"auto_day_open",
+        lastAutoPendingDate:today,
+        updatedAt:serverTimestamp(),
+        updatedBy:state.user.uid
+      },{merge:true});
+
+      const noticeKey=`mfs-auto-pending:${today}`;
+      if (!sessionStorage.getItem(noticeKey)) {
+        sessionStorage.setItem(noticeKey,"1");
+        showToast(`Dia aberto: ${changedCount} turno(s) de ${schoolCount} escola(s) marcados como pendentes.`);
+      }
+    }
+
+    state.lastAutoPendingDate = today;
+    state.lastAutoPendingSchoolCount = currentSchoolCount;
+  } finally {
+    state.autoPendingBusy = false;
+  }
+}
+
 function startAssistantEngine() {
   if (!state.user || !state.profile) return;
   subscribeAssistantSettings();
@@ -1191,6 +1528,11 @@ function startAssistantEngine() {
   state.assistantRefreshTimer = setInterval(refreshAssistantStatus,5*60*1000);
   checkScheduledAlerts();
   state.alertTimer = setInterval(checkScheduledAlerts,30*1000);
+  scheduleTodayPendingSync(500);
+  state.dayWatchTimer = setInterval(() => {
+    const today = localISODate();
+    if (state.lastAutoPendingDate !== today) scheduleTodayPendingSync(100);
+  }, 60*1000);
   if ($("#taskDateInput") && !$("#taskDateInput").value) $("#taskDateInput").value = localISODate();
   if ($("#eventDateInput") && !$("#eventDateInput").value) $("#eventDateInput").value = localISODate();
 }
@@ -1220,7 +1562,10 @@ function subscribeAssistantSettings() {
   const ref = doc(db,"users",state.user.uid,"settings","assistant");
   state.unsubAssistantSettings = onSnapshot(ref,snap=>{
     state.assistantSettings = { ...defaultAssistantSettings(), ...(snap.exists()?snap.data():{}) };
-    if ($("#waterIntervalSelect")) $("#waterIntervalSelect").value = String(state.assistantSettings.waterIntervalMinutes || 90);
+    if ($("#waterIntervalSelect")) {
+      $("#waterIntervalSelect").value = String(state.assistantSettings.waterIntervalMinutes || 90);
+      syncCustomSelect($("#waterIntervalSelect"));
+    }
     renderWaterStatus();
   },error=>console.error("Falha nas configurações do assistente:",error));
 }
@@ -1283,7 +1628,7 @@ function sessionAlertKey(key,time,date=localISODate()){return `mfs-alert:${date}
 function checkScheduledAlerts(){if(!state.user||!state.profile)return;const now=new Date();const hm=`${pad2(now.getHours())}:${pad2(now.getMinutes())}`;for(const item of workRoutineFor(now)){if(hm!==item.time)continue;const key=sessionAlertKey(item.key,item.time);if(sessionStorage.getItem(key))continue;sessionStorage.setItem(key,"1");notifyUser(`MFS · ${item.title}`,item.detail);}const water=waterDueInfo();if(water.due){const bucket=Math.floor(Date.now()/(30*60*1000));const key=`mfs-water:${bucket}`;if(!sessionStorage.getItem(key)){sessionStorage.setItem(key,"1");notifyUser("MFS · Hora da água","Reserve um minuto para beber água e depois registre no Assistente.");}}checkTaskAlerts();}
 function checkTaskAlerts(){const now=new Date();const today=localISODate();const hm=`${pad2(now.getHours())}:${pad2(now.getMinutes())}`;Object.values(state.tasks).forEach(task=>{if(task.done||task.dueDate!==today||!task.dueTime||task.dueTime!==hm)return;const key=sessionAlertKey(`task-${task.id}`,hm);if(sessionStorage.getItem(key))return;sessionStorage.setItem(key,"1");notifyUser("MFS · Tarefa agora",task.title||"Você tem uma tarefa agendada.");});}
 
-async function refreshAssistantStatus(){if(!state.user||!state.profile)return;try{const today=localISODate();const yesterday=addDaysToDateKey(today,-1);const checks=[{date:yesterday,shift:"noite",label:"Noite de ontem",due:"08:00"},{date:today,shift:"manha",label:"Manhã",due:"12:00"},{date:today,shift:"integral",label:"Integral",due:"12:00"},{date:today,shift:"tarde",label:"Tarde",due:"15:30"}];const snaps=await Promise.all(checks.map(item=>getDoc(doc(db,"dailyRuns",`${item.date}_${item.shift}`))));const now=minutesOfDay();const results=checks.map((item,i)=>({...item,done:snaps[i].exists(),overdue:!snaps[i].exists()&&now>=hhmmToMinutes(item.due)}));state.assistantOps=results;renderAssistantChecklist();await renderCalendarAlerts();updateAssistantNextAction();}catch(error){console.error("Falha ao atualizar Assistente:",error);}}
+async function refreshAssistantStatus(){if(!state.user||!state.profile)return;try{await ensureTodayPending();const today=localISODate();const yesterday=addDaysToDateKey(today,-1);const checks=[{date:yesterday,shift:"noite",label:"Noite de ontem",due:"08:00"},{date:today,shift:"manha",label:"Manhã",due:"12:00"},{date:today,shift:"integral",label:"Integral",due:"12:00"},{date:today,shift:"tarde",label:"Tarde",due:"15:30"}];const snaps=await Promise.all(checks.map(item=>getDoc(doc(db,"dailyRuns",`${item.date}_${item.shift}`))));const now=minutesOfDay();const results=checks.map((item,i)=>({...item,done:snaps[i].exists(),overdue:!snaps[i].exists()&&now>=hhmmToMinutes(item.due)}));state.assistantOps=results;renderAssistantChecklist();await renderCalendarAlerts();updateAssistantNextAction();}catch(error){console.error("Falha ao atualizar Assistente:",error);}}
 function renderAssistantChecklist(){if(!$("#assistantChecklist"))return;const items=state.assistantOps||[];$("#assistantChecklist").innerHTML=items.map(item=>{const cls=item.done?"done":item.overdue?"pending":"wait";const icon=item.done?"✓":item.overdue?"!":"◷";const text=item.done?"Importado":item.overdue?"Atrasado":"Aguardando horário";return `<div class="assistant-check-item"><span class="assistant-check-icon ${cls}">${icon}</span><div class="assistant-check-copy"><strong>${item.label}</strong><small>${item.date===localISODate()?"Hoje":formatDateBR(item.date)} · conferir até ${item.due}</small></div><span class="assistant-check-badge">${text}</span></div>`}).join("");}
 function updateAssistantNextAction(){const now=minutesOfDay();const overdue=(state.assistantOps||[]).filter(i=>i.overdue&&!i.done);let title="Rotina em dia";let sub="Continue usando o MFS para registrar as próximas atualizações.";if(overdue.length){title=`${overdue.length} atualização(ões) atrasada(s)`;sub=`Prioridade: ${overdue.map(x=>x.label).join(", ")}. Abra CSV diário e atualize quando possível.`;}else{const nextOps=(state.assistantOps||[]).filter(i=>!i.done&&hhmmToMinutes(i.due)>now).sort((a,b)=>hhmmToMinutes(a.due)-hhmmToMinutes(b.due));const nextRoutine=workRoutineFor().filter(i=>hhmmToMinutes(i.time)>now).sort((a,b)=>hhmmToMinutes(a.time)-hhmmToMinutes(b.time))[0];const nextOp=nextOps[0];if(nextOp&&(!nextRoutine||hhmmToMinutes(nextOp.due)<=hhmmToMinutes(nextRoutine.time))){title=`${nextOp.label} · até ${nextOp.due}`;sub="O Assistente vai sinalizar se esse turno continuar sem importação depois do horário.";}else if(nextRoutine){title=`${nextRoutine.time} · ${nextRoutine.title}`;sub=nextRoutine.detail;}}if($("#assistantNextAction"))$("#assistantNextAction").innerHTML=`<span>Próxima ação</span><strong>${escapeHtml(title)}</strong>`;if($("#assistantNextText"))$("#assistantNextText").textContent=sub;if($("#assistantTopText"))$("#assistantTopText").textContent=overdue.length?`${overdue.length} pendência(s) de rotina`:"Assistente";if($("#assistantTopSub"))$("#assistantTopSub").textContent=overdue.length?overdue.map(x=>x.label).join(" · "):title;}
 
@@ -1338,6 +1683,7 @@ function renderAccessRequests(requests) {
   $("#requestCount").textContent=String(requests.length);
   $("#accessRequestList").innerHTML=requests.length?requests.map(req=>`<div class="access-item"><div class="access-identity"><img class="access-avatar" src="${escapeHtml(req.photoURL||"")}" alt="" onerror="this.style.visibility='hidden'"><div class="access-copy"><strong>${escapeHtml(req.displayName||"Usuário Google")}</strong><span>${escapeHtml(req.email||"")}</span><small>${escapeHtml(req.uid)}</small></div></div><div class="access-actions"><select data-role-for="${escapeHtml(req.uid)}"><option value="tecnico">Técnico</option><option value="admin">Administrador</option></select><button class="mini-button approve" type="button" data-approve-user="${escapeHtml(req.uid)}">Aprovar</button></div></div>`).join(""):`<div class="empty-preview small-empty"><strong>Nenhuma solicitação pendente</strong></div>`;
   $$('[data-approve-user]').forEach(button=>button.addEventListener('click',()=>approveUser(button.dataset.approveUser,requests.find(r=>r.uid===button.dataset.approveUser))));
+  enhanceAllSelects($("#accessRequestList"));
 }
 
 function renderAuthorizedUsers(users) {
@@ -1345,6 +1691,7 @@ function renderAuthorizedUsers(users) {
   $("#authorizedUserList").innerHTML=users.length?users.map(user=>{const self=user.uid===state.user.uid;return `<div class="access-item"><div class="access-identity"><img class="access-avatar" src="${escapeHtml(user.photoURL||"")}" alt="" onerror="this.style.visibility='hidden'"><div class="access-copy"><strong>${escapeHtml(user.displayName||user.email||user.uid)}</strong><span>${escapeHtml(user.email||"")}</span><small><span class="role-badge ${user.active===false?"inactive":""}">${user.active===false?"Bloqueado":user.role||"tecnico"}</span></small></div></div><div class="access-actions"><select data-change-role="${escapeHtml(user.uid)}" ${self?"disabled":""}><option value="tecnico" ${user.role!=="admin"?"selected":""}>Técnico</option><option value="admin" ${user.role==="admin"?"selected":""}>Administrador</option></select><button class="mini-button ${user.active===false?"approve":"danger"}" type="button" data-toggle-user="${escapeHtml(user.uid)}" data-active="${user.active!==false}" ${self?"disabled":""}>${user.active===false?"Reativar":"Bloquear"}</button></div></div>`;}).join(""):`<div class="empty-preview small-empty"><strong>Nenhum usuário cadastrado</strong></div>`;
   $$('[data-change-role]').forEach(select=>select.addEventListener('change',()=>changeUserRole(select.dataset.changeRole,select.value)));
   $$('[data-toggle-user]').forEach(button=>button.addEventListener('click',()=>toggleUser(button.dataset.toggleUser,button.dataset.active==="true")));
+  enhanceAllSelects($("#authorizedUserList"));
 }
 
 async function approveUser(uid,request) {
@@ -1372,13 +1719,28 @@ async function toggleUser(uid,currentlyActive) {
 
 function switchView(view) {
   if ((view==="import"||view==="users")&&!isAdmin()) return;
-  $$(".nav-button").forEach(btn=>btn.classList.toggle("active",btn.dataset.view===view));
-  $$(".view").forEach(panel=>panel.classList.toggle("active",panel.dataset.viewPanel===view));
-  const labels={monitor:"Acompanhamento",daily:"CSV diário",assistant:"Assistente",import:"Monitora",users:"Usuários"};
-  $("#workspaceTitle").textContent=labels[view]||"MFS";
-  $("#sidebar").classList.remove("open");
+  const update = () => {
+    $$(".nav-button").forEach(btn=>btn.classList.toggle("active",btn.dataset.view===view));
+    $$(".view").forEach(panel=>panel.classList.toggle("active",panel.dataset.viewPanel===view));
+    const labels={monitor:"Acompanhamento",daily:"CSV diário",assistant:"Assistente",import:"Monitora",users:"Usuários"};
+    $("#workspaceTitle").textContent=labels[view]||"MFS";
+    $("#sidebar").classList.remove("open");
+  };
+
+  if (document.startViewTransition) {
+    document.startViewTransition(update);
+  } else {
+    const current = $(".view.active");
+    current?.classList.add("view-leaving");
+    setTimeout(() => {
+      update();
+      current?.classList.remove("view-leaving");
+    }, 120);
+  }
+
   if(view==="users")loadUserManagement();
   if(view==="assistant")refreshAssistantStatus();
+  closeCustomSelects();
 }
 
 function bindEvents() {
@@ -1426,6 +1788,11 @@ function bindEvents() {
   $("#dailyDate")?.addEventListener("change",event=>renderCharges(event.target.value));
   $("#dailyShift")?.addEventListener("change",()=>{if(state.dailyPreview){state.dailyPreview=null;$("#applyDaily").disabled=true;}});
   $("#copyAllCharges")?.addEventListener("click",copyAllCharges);
+  $$('[data-charge-view]').forEach(button=>button.addEventListener("click",()=>{
+    state.chargeView=button.dataset.chargeView;
+    sessionStorage.setItem("mfs-charge-view",state.chargeView);
+    renderCharges($("#dailyDate")?.value);
+  }));
   const csvDrop=$("#csvDropZone");
   ["dragenter","dragover"].forEach(name=>csvDrop?.addEventListener(name,event=>{event.preventDefault();csvDrop.classList.add("drag");}));
   ["dragleave","drop"].forEach(name=>csvDrop?.addEventListener(name,event=>{event.preventDefault();csvDrop.classList.remove("drag");}));
@@ -1461,4 +1828,6 @@ function bindEvents() {
 }
 
 bindEvents();
+initCustomSelectSystem();
+initMotionInteractions();
 startFirebase().catch(error=>{console.error(error);showOnlyGate("configGate");});
