@@ -35,6 +35,7 @@ const FIREBASE = CONFIG.firebase || {};
 const SHIFT_LABELS = { manha: "Manhã", tarde: "Tarde", noite: "Noite", integral: "Integral" };
 const SHIFT_CODES = { M: "manha", T: "tarde", N: "noite", I: "integral" };
 const SHIFT_ORDER = ["manha", "tarde", "noite", "integral"];
+const EXPECTED_ROSTER_VERSION = 2;
 const STATUS_INFO = {
   G: { key: "enviada", label: "Com frequência", cls: "sent", short: "OK" },
   R: { key: "pendente", label: "Pendente", cls: "pending", short: "!" },
@@ -423,8 +424,31 @@ function normalizeShiftList(list) {
   return SHIFT_ORDER.filter(shift => values.includes(shift));
 }
 
+function normalizeExpectedShiftRoster(value) {
+  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
+  const out = {};
+  SHIFT_ORDER.forEach(shift => {
+    if (typeof source[shift] === "boolean") out[shift] = source[shift];
+  });
+  return out;
+}
+
+function hasExpectedRosterV2(meta) {
+  return Number(meta?.expectedShiftRosterVersion || 0) >= EXPECTED_ROSTER_VERSION;
+}
+
 function effectiveShiftsForSchool(schoolId, record = null) {
   const meta = state.schools[schoolId] || {};
+
+  // v2: o CSV calibra cada turno de modo independente. Somente flags
+  // explicitamente verdadeiras são exibidas/cobradas. Isso elimina a lista
+  // expectedShifts antiga, que podia ter sido contaminada por uma importação.
+  if (hasExpectedRosterV2(meta)) {
+    const roster = normalizeExpectedShiftRoster(meta.expectedShiftRoster);
+    return SHIFT_ORDER.filter(shift => roster[shift] === true);
+  }
+
+  // Compatibilidade temporária com a base anterior, até a primeira calibração v2.
   if (Array.isArray(meta.expectedShifts)) return normalizeShiftList(meta.expectedShifts);
   if (Array.isArray(meta.shifts) && meta.shifts.length) return normalizeShiftList(meta.shifts);
   return recordShifts(record || state.records[schoolId]);
@@ -432,6 +456,7 @@ function effectiveShiftsForSchool(schoolId, record = null) {
 
 function expectedShiftSeed(schoolId, record = null) {
   const meta = state.schools[schoolId] || {};
+  if (hasExpectedRosterV2(meta)) return effectiveShiftsForSchool(schoolId, record);
   if (Array.isArray(meta.expectedShifts)) return normalizeShiftList(meta.expectedShifts);
   const legacy = new Set();
   if (Array.isArray(meta.shifts)) meta.shifts.forEach(shift => { if (SHIFT_ORDER.includes(shift)) legacy.add(shift); });
@@ -873,9 +898,10 @@ function renderSchoolCard(id, meta, record, month) {
   const counts = perSchoolCounts(record, shifts);
   const nonSchool = Object.entries(record?.n || {}).map(([day, reason]) => `${day}: ${reason}`).join(" · ");
   const expectedText = expected.length ? expected.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Nenhum turno esperado";
-  const csvDefined = Array.isArray(meta?.expectedShifts);
+  const csvDefined = hasExpectedRosterV2(meta) || Array.isArray(meta?.expectedShifts);
+  const calibratedCount = hasExpectedRosterV2(meta) ? Object.keys(normalizeExpectedShiftRoster(meta.expectedShiftRoster)).length : 0;
   return `<article class="card school-card" data-school-id="${escapeHtml(id)}" data-calendar-hydrated="0">
-    <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}<span class="meta-pill expected-shifts-pill" title="Turnos esperados definidos pelo CSV diário">${csvDefined ? "CSV" : "Legado"}: ${escapeHtml(expectedText)}</span></div></div><div class="school-head-actions"><button class="school-profile-button" type="button" data-school-history="${escapeHtml(id)}">Histórico</button><button class="school-profile-button" type="button" data-school-profile="${escapeHtml(id)}">Perfil</button><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></div></header>
+    <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}<span class="meta-pill expected-shifts-pill" title="Turnos esperados definidos pelo CSV diário">${hasExpectedRosterV2(meta) ? `CSV ${calibratedCount}/4` : (csvDefined ? "CSV legado" : "Legado")}: ${escapeHtml(expectedText)}</span></div></div><div class="school-head-actions"><button class="school-profile-button" type="button" data-school-history="${escapeHtml(id)}">Histórico</button><button class="school-profile-button" type="button" data-school-profile="${escapeHtml(id)}">Perfil</button><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></div></header>
     <div class="school-calendar virtual-calendar">${virtualCalendarPlaceholder()}</div>
     <div class="school-footer"><span class="hint">Clique em M, T, N ou I para editar</span><span class="non-school-note" title="${escapeHtml(nonSchool)}">${nonSchool ? `Ocorrências: ${escapeHtml(nonSchool)}` : "Sem ocorrências cadastradas"}</span></div>
   </article>`;
@@ -1390,43 +1416,119 @@ function calculateExpectedRosterChanges(shift, mappedRows, existingRecords = {})
   const rosterIds = new Set(mappedRows.filter(row => row.id).map(row => row.id));
   let added = 0;
   let removed = 0;
+  let previouslyKnown = 0;
+
   Object.entries(state.schools).forEach(([schoolId, meta]) => {
     if (meta?.active === false) return;
-    const before = expectedShiftSeed(schoolId, existingRecords[schoolId]).includes(shift);
+    const roster = normalizeExpectedShiftRoster(meta?.expectedShiftRoster);
+    const hasExplicitFlag = hasExpectedRosterV2(meta) && typeof roster[shift] === "boolean";
+    const before = hasExplicitFlag ? roster[shift] : expectedShiftSeed(schoolId, existingRecords[schoolId]).includes(shift);
     const after = rosterIds.has(schoolId);
+    if (hasExplicitFlag) previouslyKnown += 1;
     if (!before && after) added += 1;
     if (before && !after) removed += 1;
   });
-  return { rosterIds:[...rosterIds], added, removed };
+
+  return { rosterIds:[...rosterIds], added, removed, previouslyKnown };
+}
+
+function inferLikelyShiftFromHistory(mappedRows, historicalRecords = {}) {
+  const matched = mappedRows.filter(row => row.id && historicalRecords[row.id]);
+  const considered = matched.filter(row => recordShifts(historicalRecords[row.id]).length);
+  const scores = Object.fromEntries(SHIFT_ORDER.map(shift => [shift, 0]));
+
+  considered.forEach(row => {
+    const shifts = recordShifts(historicalRecords[row.id]);
+    shifts.forEach(shift => { if (shift in scores) scores[shift] += 1; });
+  });
+
+  const ranking = SHIFT_ORDER
+    .map(shift => ({ shift, score:scores[shift] || 0 }))
+    .sort((a,b) => b.score - a.score || SHIFT_ORDER.indexOf(a.shift) - SHIFT_ORDER.indexOf(b.shift));
+
+  const best = ranking[0] || { shift:null, score:0 };
+  const second = ranking[1] || { shift:null, score:0 };
+  const total = considered.length;
+  const ratio = total ? best.score / total : 0;
+  const margin = total ? (best.score - second.score) / total : 0;
+  const highConfidence = total >= 5 && ratio >= 0.75 && (best.score - second.score) >= 3 && margin >= 0.15;
+
+  return { shift:best.shift, score:best.score, secondScore:second.score, total, ratio, margin, highConfidence, scores };
 }
 
 async function buildDailyPreview(fileName, rows) {
-  const date=$("#dailyDate").value;
-  const shift=$("#dailyShift").value;
+  const date = $("#dailyDate").value;
+  let shift = $("#dailyShift").value;
+  const selectedShift = shift;
   if (!date) throw new Error("Selecione a data antes do CSV.");
-  const month=date.slice(0,7);
-  const day=Number(date.slice(-2));
-  const existingRecords=await getMonthRecordsOnce(month);
-  const mapped=rows.map(row=>{
-    const schoolName=row.escola||row.nomeescola||row.unidade||row.unidadeescolar||"";
-    const director=row.diretor||row.diretorada||row.gestor||"";
-    const area=row.gerencia||row.gre||row.polo||"";
-    const frequency=csvFrequencyStatus(row.frequencia||row.status||row.situacao||"");
-    const match=findSchoolByCSVName(schoolName);
-    const beforeChar=match?.id ? statusChar(existingRecords[match.id],shift,day) : "?";
-    const afterChar=frequency==="enviada"?"G":frequency==="nao_enviada"?"R":"?";
-    return { schoolName,director,area,frequency,beforeChar,afterChar,turmas:row.turmas||row.qtdturmas||row.quantidadeturmas||"",alunos:row.alunos||row.qtdalunos||row.quantidadealunos||"",id:match?.id||null,meta:match?.meta||null,matchConfidence:match?.confidence||"nao_reconhecida" };
-  }).filter(row=>row.schoolName);
-  const summary={ total:mapped.length, sent:mapped.filter(r=>r.frequency==="enviada").length, pending:mapped.filter(r=>r.frequency==="nao_enviada").length, unknownStatus:mapped.filter(r=>r.frequency==="desconhecida").length, unknownSchools:mapped.filter(r=>!r.id).length, changed:mapped.filter(r=>r.id&&r.afterChar!=="?"&&r.beforeChar!==r.afterChar).length, same:mapped.filter(r=>r.id&&r.afterChar!=="?"&&r.beforeChar===r.afterChar).length };
-  const roster=calculateExpectedRosterChanges(shift,mapped,existingRecords);
-  return {fileName,date,shift,month,rows:mapped,summary,existingRecords,roster};
+
+  const month = date.slice(0,7);
+  const day = Number(date.slice(-2));
+  const existingRecords = await getMonthRecordsOnce(month);
+
+  const baseMapped = rows.map(row => {
+    const schoolName = row.escola || row.nomeescola || row.unidade || row.unidadeescolar || "";
+    const director = row.diretor || row.diretorada || row.gestor || "";
+    const area = row.gerencia || row.gre || row.polo || "";
+    const frequency = csvFrequencyStatus(row.frequencia || row.status || row.situacao || "");
+    const match = findSchoolByCSVName(schoolName);
+    return {
+      schoolName, director, area, frequency,
+      turmas:row.turmas || row.qtdturmas || row.quantidadeturmas || "",
+      alunos:row.alunos || row.qtdalunos || row.quantidadealunos || "",
+      id:match?.id || null,
+      meta:match?.meta || null,
+      matchConfidence:match?.confidence || "nao_reconhecida"
+    };
+  }).filter(row => row.schoolName);
+
+  // Proteção contra seleção acidental do turno errado: comparamos a composição
+  // do arquivo com o mês anterior do Monitora. Só corrigimos automaticamente
+  // quando a evidência é forte; o CSV continua sendo a fonte de verdade final.
+  let previousRecords = {};
+  try { previousRecords = await getMonthRecordsOnce(previousMonthKey(month)); } catch (_) {}
+  const inference = inferLikelyShiftFromHistory(baseMapped, previousRecords);
+  let autoCorrectedShift = false;
+
+  if (inference.highConfidence && inference.shift && inference.shift !== selectedShift) {
+    shift = inference.shift;
+    autoCorrectedShift = true;
+    const select = $("#dailyShift");
+    select.value = shift;
+    syncCustomSelect(select);
+  }
+
+  const mapped = baseMapped.map(row => {
+    const beforeChar = row.id ? statusChar(existingRecords[row.id], shift, day) : "?";
+    const afterChar = row.frequency === "enviada" ? "G" : row.frequency === "nao_enviada" ? "R" : "?";
+    return { ...row, beforeChar, afterChar };
+  });
+
+  const summary = {
+    total:mapped.length,
+    sent:mapped.filter(r => r.frequency === "enviada").length,
+    pending:mapped.filter(r => r.frequency === "nao_enviada").length,
+    unknownStatus:mapped.filter(r => r.frequency === "desconhecida").length,
+    unknownSchools:mapped.filter(r => !r.id).length,
+    changed:mapped.filter(r => r.id && r.afterChar !== "?" && r.beforeChar !== r.afterChar).length,
+    same:mapped.filter(r => r.id && r.afterChar !== "?" && r.beforeChar === r.afterChar).length
+  };
+
+  const roster = calculateExpectedRosterChanges(shift, mapped, existingRecords);
+  return { fileName,date,shift,selectedShift,autoCorrectedShift,inference,month,rows:mapped,summary,existingRecords,roster };
 }
 
 function renderDailyPreview(parsed) {
   const {summary}=parsed;
   $("#dailyPreviewTitle").textContent=`${parsed.fileName} · ${formatDateBR(parsed.date)} · ${SHIFT_LABELS[parsed.shift]}`;
   $("#dailyPreview").className="";
+  const shiftDetectionNotice = parsed.autoCorrectedShift
+    ? `<div class="import-warning compact-warning"><strong>Turno corrigido automaticamente.</strong> O arquivo foi selecionado como ${SHIFT_LABELS[parsed.selectedShift]}, mas ${parsed.inference.score}/${parsed.inference.total} escolas são compatíveis com ${SHIFT_LABELS[parsed.shift]} no histórico anterior. Para evitar uma grade incorreta, o MFS mudou o turno para <b>${SHIFT_LABELS[parsed.shift]}</b>.</div>`
+    : (parsed.inference?.highConfidence
+      ? `<div class="expected-roster-preview"><strong>Turno validado · ${SHIFT_LABELS[parsed.shift]}</strong><span>${parsed.inference.score}/${parsed.inference.total} escolas compatíveis com este turno no histórico anterior.</span><small>O CSV continua sendo a fonte de verdade da grade atual.</small></div>`
+      : "");
   $("#dailyPreview").innerHTML=`
+    ${shiftDetectionNotice}
     <div class="preview-grid">
       <div class="preview-stat"><strong>${summary.total}</strong><span>escolas no CSV</span></div>
       <div class="preview-stat"><strong>${summary.sent}</strong><span>com frequência</span></div>
@@ -1435,7 +1537,7 @@ function renderDailyPreview(parsed) {
     </div>
     ${summary.unknownStatus?`<div class="import-warning compact-warning">${summary.unknownStatus} registro(s) têm situação não reconhecida e serão ignorados.</div>`:""}
     ${summary.unknownSchools?`<div class="import-warning compact-warning">${summary.unknownSchools} escola(s) não existem no cadastro protegido. Importe primeiro o HTML do Monitora como administrador.</div>`:""}
-    <div class="expected-roster-preview"><strong>Turno esperado · ${SHIFT_LABELS[parsed.shift]}</strong><span>${parsed.roster?.rosterIds?.length || 0} escola(s) reconhecidas neste CSV · <b>+${parsed.roster?.added || 0}</b> entram · <b>-${parsed.roster?.removed || 0}</b> deixam de esperar este turno</span><small>Ao confirmar, este CSV passa a ser a fonte de verdade para o turno ${SHIFT_LABELS[parsed.shift]}.</small></div>
+    <div class="expected-roster-preview"><strong>Turno esperado · ${SHIFT_LABELS[parsed.shift]}</strong><span>${parsed.roster?.rosterIds?.length || 0} escola(s) reconhecidas neste CSV · <b>+${parsed.roster?.added || 0}</b> entram · <b>-${parsed.roster?.removed || 0}</b> deixam de esperar este turno</span><small>Ao confirmar, este CSV calibra somente o turno ${SHIFT_LABELS[parsed.shift]}. Os outros turnos permanecem independentes e não são sobrescritos.</small></div>
     <div class="transition-head compact-transition-head"><div><strong>Situação atual → situação após importar</strong><span>Mesmo quando o CSV mantém o mesmo status, a comparação aparece abaixo.</span></div></div>
     <div class="csv-table-wrap transition-table-wrap daily-transition-wrap">
       <table class="csv-table transition-table">
@@ -1485,32 +1587,57 @@ async function applyDailyCSV() {
     const appliedRows = [];
     const recordOperations = [];
 
-    // O CSV do turno é a fonte de verdade da grade esperada daquela escola.
-    // Quem aparece ganha o turno; quem não aparece deixa de esperar esse turno.
+    // Grade esperada v2: cada CSV calibra SOMENTE o turno selecionado.
+    // A ausência/presença nos outros turnos não é inferida nem sobrescrita.
+    // A primeira importação v2 também deixa de usar expectedShifts legado,
+    // eliminando configurações contaminadas por versões anteriores.
     const rosterIds = new Set((parsed.roster?.rosterIds || parsed.rows.filter(row => row.id).map(row => row.id)));
     const schoolRosterOperations = [];
+    const localRosterUpdates = [];
+
     Object.entries(state.schools).forEach(([schoolId, meta]) => {
       if (meta?.active === false) return;
-      const currentExpected = expectedShiftSeed(schoolId, parsed.existingRecords[schoolId]);
-      const nextSet = new Set(currentExpected);
-      if (rosterIds.has(schoolId)) nextSet.add(parsed.shift);
-      else nextSet.delete(parsed.shift);
-      const nextExpected = SHIFT_ORDER.filter(shift => nextSet.has(shift));
-      const beforeJson = JSON.stringify(normalizeShiftList(meta?.expectedShifts));
-      const afterJson = JSON.stringify(nextExpected);
-      if (!Array.isArray(meta?.expectedShifts) || beforeJson !== afterJson) {
-        schoolRosterOperations.push(batch => {
-          batch.set(doc(db,"schools",schoolId), {
-            expectedShifts: nextExpected,
-            expectedShiftsUpdatedAt: serverTimestamp(),
-            expectedShiftsUpdatedBy: state.user.uid
-          }, { merge:true });
-        });
-      }
+
+      const currentRoster = hasExpectedRosterV2(meta)
+        ? normalizeExpectedShiftRoster(meta.expectedShiftRoster)
+        : {};
+      const nextRoster = { ...currentRoster, [parsed.shift]: rosterIds.has(schoolId) };
+      const nextExpected = SHIFT_ORDER.filter(shift => nextRoster[shift] === true);
+
+      const changed = !hasExpectedRosterV2(meta)
+        || JSON.stringify(currentRoster) !== JSON.stringify(nextRoster)
+        || JSON.stringify(normalizeShiftList(meta?.expectedShifts)) !== JSON.stringify(nextExpected);
+
+      if (!changed) return;
+
+      schoolRosterOperations.push(batch => {
+        batch.set(doc(db,"schools",schoolId), {
+          expectedShiftRoster: nextRoster,
+          expectedShiftRosterVersion: EXPECTED_ROSTER_VERSION,
+          expectedShiftRosterUpdatedAt: serverTimestamp(),
+          expectedShiftRosterUpdatedBy: state.user.uid,
+          expectedShifts: nextExpected,
+          expectedShiftsUpdatedAt: serverTimestamp(),
+          expectedShiftsUpdatedBy: state.user.uid
+        }, { merge:true });
+      });
+
+      localRosterUpdates.push({ schoolId, nextRoster, nextExpected });
     });
 
     if (schoolRosterOperations.length) {
       await commitWriteOperationsInChunks(schoolRosterOperations);
+      // Atualização otimista local para que o próximo CSV importado imediatamente
+      // já enxergue a calibração anterior, sem depender do atraso do snapshot.
+      localRosterUpdates.forEach(({schoolId,nextRoster,nextExpected}) => {
+        const meta = state.schools[schoolId] || {};
+        state.schools[schoolId] = {
+          ...meta,
+          expectedShiftRoster: nextRoster,
+          expectedShiftRosterVersion: EXPECTED_ROSTER_VERSION,
+          expectedShifts: nextExpected
+        };
+      });
     }
 
     parsed.rows.forEach(row => {
@@ -1616,12 +1743,19 @@ async function applyDailyCSV() {
 
     await finalBatch.commit();
 
+    // A grade mudou: reavaliamos a abertura automática do dia usando somente
+    // os turnos esperados v2. Turnos falsos deixam de gerar pendência/cobrança.
+    state.lastAutoPendingDate = null;
+    state.lastAutoPendingSchoolCount = 0;
     state.month = parsed.month;
+    renderMonitor();
+    if ($("#view-school")?.classList.contains("active")) renderSchoolHistory();
     subscribeMonthRecords(state.month);
     clearDaily(false);
+    await ensureTodayPending();
     await renderCharges(parsed.date);
 
-    showToast(`${appliedRows.length} registros gravados no Firestore.`);
+    showToast(`${appliedRows.length} registros gravados · grade de ${SHIFT_LABELS[parsed.shift]} recalibrada.`);
     refreshAssistantStatus();
   } catch (error) {
     console.error("Erro ao aplicar CSV diário:", error);
@@ -2126,9 +2260,16 @@ function renderSchoolHistorySelector() {
   if ($("#schoolHistoryProfile")) $("#schoolHistoryProfile").disabled = !state.schoolHistoryId;
 }
 
-function historyStatusCounts(schoolId, record) {
+function historyShiftsForMonth(schoolId, record, month) {
+  const currentMonth = localISODate().slice(0,7);
+  // No mês atual usamos a grade operacional calibrada pelos CSVs.
+  // Meses anteriores preservam exatamente os turnos existentes no histórico.
+  return month === currentMonth ? effectiveShiftsForSchool(schoolId, record) : recordShifts(record);
+}
+
+function historyStatusCounts(schoolId, record, month) {
   const counts = { G:0, R:0, J:0 };
-  for (const shift of effectiveShiftsForSchool(schoolId, record)) {
+  for (const shift of historyShiftsForMonth(schoolId, record, month)) {
     for (const ch of record?.s?.[shift] || "") if (ch in counts) counts[ch] += 1;
   }
   return counts;
@@ -2167,8 +2308,8 @@ function renderSchoolHistory() {
   const expected = effectiveShiftsForSchool(schoolId, Object.values(state.schoolHistoryRecords)[0] || null);
   const expectedText = expected.length ? expected.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Nenhum turno definido";
   const entries = Object.entries(state.schoolHistoryRecords).sort((a,b) => b[0].localeCompare(a[0]));
-  const totals = entries.reduce((acc,[,record]) => {
-    const c = historyStatusCounts(schoolId, record);
+  const totals = entries.reduce((acc,[month,record]) => {
+    const c = historyStatusCounts(schoolId, record, month);
     acc.G += c.G; acc.R += c.R; acc.J += c.J;
     return acc;
   }, {G:0,R:0,J:0});
@@ -2181,8 +2322,8 @@ function renderSchoolHistory() {
   }
 
   container.innerHTML = entries.map(([month, record]) => {
-    const shifts = effectiveShiftsForSchool(schoolId, record);
-    const counts = historyStatusCounts(schoolId, record);
+    const shifts = historyShiftsForMonth(schoolId, record, month);
+    const counts = historyStatusCounts(schoolId, record, month);
     const ndays = daysInMonth(month);
     const monthMeta = state.months[month] || {};
     return `<article class="card school-history-month-card"><header class="history-month-head"><div><p class="eyebrow">${escapeHtml(monthMeta.lastSource === "monitora" ? "Monitora" : "Histórico")}</p><h3>${monthLabel(month)}</h3><span>${shifts.length ? shifts.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Sem turnos esperados"}</span></div><div class="history-month-counts"><span><b>${counts.G}</b> frequência</span><span><b>${counts.R}</b> pendente</span><span><b>${counts.J}</b> justificada</span></div></header><div class="school-calendar history-school-calendar">${shifts.length ? renderHistoryCalendarHalf(schoolId, record, shifts, month, 1, Math.min(15,ndays)) + (ndays > 15 ? renderHistoryCalendarHalf(schoolId, record, shifts, month, 16, ndays) : "") : '<div class="empty-card">Sem turnos esperados.</div>'}</div><div class="history-edit-hint">Clique em um turno para editar · segure e arraste sobre pendências vermelhas para selecionar em massa.</div></article>`;

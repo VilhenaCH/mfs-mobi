@@ -70,11 +70,25 @@ service cloud.firestore {
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
           'expectedShifts',
           'expectedShiftsUpdatedAt',
-          'expectedShiftsUpdatedBy'
+          'expectedShiftsUpdatedBy',
+          'expectedShiftRoster',
+          'expectedShiftRosterVersion',
+          'expectedShiftRosterUpdatedAt',
+          'expectedShiftRosterUpdatedBy'
         ])
         && request.resource.data.expectedShifts is list
         && request.resource.data.expectedShifts.size() <= 4
         && request.resource.data.expectedShiftsUpdatedBy == request.auth.uid
+        && request.resource.data.expectedShiftRoster is map
+        && request.resource.data.expectedShiftRoster.keys().hasOnly([
+          'manha', 'integral', 'tarde', 'noite'
+        ])
+        && (!(request.resource.data.expectedShiftRoster.keys().hasAny(['manha'])) || request.resource.data.expectedShiftRoster.manha is bool)
+        && (!(request.resource.data.expectedShiftRoster.keys().hasAny(['integral'])) || request.resource.data.expectedShiftRoster.integral is bool)
+        && (!(request.resource.data.expectedShiftRoster.keys().hasAny(['tarde'])) || request.resource.data.expectedShiftRoster.tarde is bool)
+        && (!(request.resource.data.expectedShiftRoster.keys().hasAny(['noite'])) || request.resource.data.expectedShiftRoster.noite is bool)
+        && request.resource.data.expectedShiftRosterVersion == 2
+        && request.resource.data.expectedShiftRosterUpdatedBy == request.auth.uid
       );
     }
 
