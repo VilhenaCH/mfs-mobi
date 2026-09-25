@@ -67,6 +67,23 @@ const state = {
   dailyPreview: null,
   chargeGroups: [],
   editor: null,
+  bulkSelection: new Map(),
+  dragSelection: null,
+  suppressStatusClickUntil: 0,
+  schoolProfileId: null,
+  schoolProfileData: null,
+  schoolCredentials: [],
+  vaultPassphrase: null,
+  assistantSettings: { waterIntervalMinutes: 90, lastWaterAt: null },
+  tasks: {},
+  assistantEvents: {},
+  assistantOps: null,
+  unsubTasks: null,
+  unsubAssistantSettings: null,
+  unsubAssistantEvents: null,
+  clockTimer: null,
+  assistantRefreshTimer: null,
+  alertTimer: null,
   unsubSchools: null,
   unsubMonths: null,
   unsubMonthRecords: null
@@ -247,10 +264,15 @@ async function requestAccess(user) {
 }
 
 function cleanupSubscriptions() {
-  for (const key of ["unsubSchools","unsubMonths","unsubMonthRecords"]) {
+  for (const key of ["unsubSchools","unsubMonths","unsubMonthRecords","unsubTasks","unsubAssistantSettings","unsubAssistantEvents"]) {
     if (typeof state[key] === "function") state[key]();
     state[key] = null;
   }
+  for (const timerKey of ["clockTimer","assistantRefreshTimer","alertTimer"]) {
+    if (state[timerKey]) clearInterval(state[timerKey]);
+    state[timerKey] = null;
+  }
+  state.vaultPassphrase = null;
 }
 
 function enterAuthorizedApp() {
@@ -273,6 +295,7 @@ function enterAuthorizedApp() {
   subscribeMonthRecords(state.month);
   renderCharges($("#dailyDate")?.value);
   if (isAdmin()) loadUserManagement();
+  startAssistantEngine();
 }
 
 function subscribeSchools() {
@@ -445,7 +468,7 @@ function renderCalendarHalf(id, record, shifts, month, startDay, endDay) {
       const info = STATUS_INFO[ch] || STATUS_INFO["?"];
       const reason = record?.r?.[String(day)]?.[shift] || (ch === "X" ? record?.n?.[String(day)] : "") || "";
       const title = `${String(day).padStart(2,"0")}/${month.slice(5,7)}/${month.slice(0,4)} · ${SHIFT_LABELS[shift]} · ${info.label}${reason ? ` · ${reason}` : ""}`;
-      return `<button class="status-chip ${info.cls}${reason ? " has-reason" : ""}" type="button" data-edit-status="1" data-school-id="${escapeHtml(id)}" data-day="${day}" data-shift="${shift}" title="${escapeHtml(title)}">${shiftCode(shift)}</button>`;
+      return `<button class="status-chip ${info.cls}${reason ? " has-reason" : ""}" type="button" data-edit-status="1" data-school-id="${escapeHtml(id)}" data-day="${day}" data-shift="${shift}" data-status-char="${ch}" data-selection-key="${escapeHtml(`${id}|${day}|${shift}`)}" title="${escapeHtml(title)}">${shiftCode(shift)}</button>`;
     }).join("");
     days.push(`<div class="calendar-day">${chips}</div>`);
   }
@@ -458,7 +481,7 @@ function renderSchoolCard(id, meta, record, month) {
   const ndays = daysInMonth(month);
   const nonSchool = Object.entries(record?.n || {}).map(([day, reason]) => `${day}: ${reason}`).join(" · ");
   return `<article class="card school-card">
-    <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}</div></div><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></header>
+    <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}</div></div><div class="school-head-actions"><button class="school-profile-button" type="button" data-school-profile="${escapeHtml(id)}">Perfil</button><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></div></header>
     <div class="school-calendar">${shifts.length ? renderCalendarHalf(id, record, shifts, month, 1, Math.min(15, ndays)) + (ndays > 15 ? renderCalendarHalf(id, record, shifts, month, 16, ndays) : "") : `<div class="empty-card">Sem turnos registrados neste mês.</div>`}</div>
     <div class="school-footer"><span class="hint">Clique em M, T, N ou I para editar</span><span class="non-school-note" title="${escapeHtml(nonSchool)}">${nonSchool ? `Ocorrências: ${escapeHtml(nonSchool)}` : "Sem ocorrências cadastradas"}</span></div>
   </article>`;
@@ -1058,6 +1081,7 @@ async function applyDailyCSV() {
     await renderCharges(parsed.date);
 
     showToast(`${appliedRows.length} registros gravados no Firestore.`);
+    refreshAssistantStatus();
   } catch (error) {
     console.error("Erro ao aplicar CSV diário:", error);
 
@@ -1096,10 +1120,27 @@ async function buildChargeGroups(date) {
   return {groups:[...groups.values()].sort((a,b)=>a.schoolName.localeCompare(b.schoolName,"pt-BR")),importedShifts};
 }
 
+function greetingByTime(date = new Date()) {
+  const hour = date.getHours();
+  if (hour >= 5 && hour < 12) return "bom dia";
+  if (hour >= 12 && hour < 18) return "boa tarde";
+  return "boa noite";
+}
+
+function naturalShiftText(shifts) {
+  const labels = shifts.map(shift => SHIFT_LABELS[shift] || shift);
+  if (labels.length === 1) return labels[0];
+  if (labels.length === 2) return labels.join(" e ");
+  return `${labels.slice(0,-1).join(", ")} e ${labels.at(-1)}`;
+}
+
 function chargeMessage(group,date) {
-  const shifts=group.shifts.map(shift=>SHIFT_LABELS[shift]);
-  const shiftText=shifts.length===1?shifts[0]:shifts.length===2?shifts.join(" e "):`${shifts.slice(0,-1).join(", ")} e ${shifts.at(-1)}`;
-  return `Olá! Na conferência da frequência escolar referente ao dia ${formatDateBR(date)}, identificamos que a frequência da ${group.schoolName}, no(s) turno(s) ${shiftText}, não consta como enviada no sistema. Solicitamos, por gentileza, que seja realizada a verificação e, se necessário, a regularização do registro. Após o ajuste, pedimos que nos confirme por aqui. Obrigado!`;
+  const greeting = greetingByTime();
+  const today = localISODate();
+  const dateText = date === today ? "a frequência de hoje" : `a frequência do dia ${formatDateBR(date)}`;
+  const shiftText = naturalShiftText(group.shifts);
+  const shiftPhrase = group.shifts.length === 1 ? `no turno ${shiftText}` : `nos turnos ${shiftText}`;
+  return `Olá, ${greeting}! Venho comunicar que, ao verificar ${dateText}, identifiquei que ela ainda está pendente no sistema ${shiftPhrase}. Você consegue confirmar para mim se a frequência foi realizada corretamente ou se houve algum problema? Caso ainda seja necessário algum ajuste, pode me informar se está disponível para eu liberar a correção da frequência e deixarmos tudo ok? Obrigado!`;
 }
 
 function copyText(text) {
@@ -1125,6 +1166,162 @@ function copyAllCharges() {
   if(!date||!state.chargeGroups.length)return;
   copyText(state.chargeGroups.map(group=>chargeMessage(group,date)).join("\n\n--------------------\n\n"));
 }
+
+
+
+function pad2(value) { return String(value).padStart(2,"0"); }
+function dateKeyFromDate(date) { return `${date.getFullYear()}-${pad2(date.getMonth()+1)}-${pad2(date.getDate())}`; }
+function addDaysToDateKey(dateKey, delta) {
+  const [y,m,d] = dateKey.split("-").map(Number);
+  const dt = new Date(y,m-1,d); dt.setDate(dt.getDate()+delta); return dateKeyFromDate(dt);
+}
+function minutesOfDay(date = new Date()) { return date.getHours()*60 + date.getMinutes(); }
+function hhmmToMinutes(value) { const [h,m] = value.split(":").map(Number); return h*60+m; }
+function formatClock(date = new Date()) { return `${pad2(date.getHours())}:${pad2(date.getMinutes())}:${pad2(date.getSeconds())}`; }
+function formatLongDate(date = new Date()) { return new Intl.DateTimeFormat("pt-BR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"}).format(date); }
+
+function startAssistantEngine() {
+  if (!state.user || !state.profile) return;
+  subscribeAssistantSettings();
+  subscribeTasks();
+  subscribeAssistantEvents();
+  tickClock();
+  state.clockTimer = setInterval(tickClock,1000);
+  refreshAssistantStatus();
+  state.assistantRefreshTimer = setInterval(refreshAssistantStatus,5*60*1000);
+  checkScheduledAlerts();
+  state.alertTimer = setInterval(checkScheduledAlerts,30*1000);
+  if ($("#taskDateInput") && !$("#taskDateInput").value) $("#taskDateInput").value = localISODate();
+  if ($("#eventDateInput") && !$("#eventDateInput").value) $("#eventDateInput").value = localISODate();
+}
+
+function tickClock() {
+  const now = new Date();
+  const time = formatClock(now);
+  const shortDate = `${pad2(now.getDate())}/${pad2(now.getMonth()+1)}/${now.getFullYear()}`;
+  if ($("#topClockTime")) $("#topClockTime").textContent = time;
+  if ($("#topClockDate")) $("#topClockDate").textContent = shortDate;
+  if ($("#assistantClockTime")) $("#assistantClockTime").textContent = time;
+  if ($("#assistantClockDate")) $("#assistantClockDate").textContent = formatLongDate(now);
+  if ($("#assistantGreeting")) {
+    const name = (state.profile?.displayName || state.user?.displayName || "").split(" ")[0];
+    $("#assistantGreeting").textContent = `${greetingByTime(now).replace(/^./,c=>c.toUpperCase())}${name ? `, ${name}` : ""}`;
+  }
+  renderRoutineTimeline();
+  renderWaterStatus();
+}
+
+function defaultAssistantSettings() {
+  return { waterIntervalMinutes:90, lastWaterAt:null };
+}
+
+function subscribeAssistantSettings() {
+  if (typeof state.unsubAssistantSettings === "function") state.unsubAssistantSettings();
+  const ref = doc(db,"users",state.user.uid,"settings","assistant");
+  state.unsubAssistantSettings = onSnapshot(ref,snap=>{
+    state.assistantSettings = { ...defaultAssistantSettings(), ...(snap.exists()?snap.data():{}) };
+    if ($("#waterIntervalSelect")) $("#waterIntervalSelect").value = String(state.assistantSettings.waterIntervalMinutes || 90);
+    renderWaterStatus();
+  },error=>console.error("Falha nas configurações do assistente:",error));
+}
+
+async function saveAssistantSetting(data) {
+  await setDoc(doc(db,"users",state.user.uid,"settings","assistant"),{
+    ...data, updatedAt:serverTimestamp(), updatedBy:state.user.uid
+  },{merge:true});
+}
+
+function subscribeTasks() {
+  if (typeof state.unsubTasks === "function") state.unsubTasks();
+  state.unsubTasks = onSnapshot(collection(db,"users",state.user.uid,"tasks"),snapshot=>{
+    const tasks={}; snapshot.forEach(s=>tasks[s.id]={id:s.id,...s.data()}); state.tasks=tasks; renderTasks();
+  },error=>console.error("Falha ao carregar tarefas:",error));
+}
+
+function taskDueStamp(task) { return `${task.dueDate || "9999-12-31"}T${task.dueTime || "23:59"}`; }
+function renderTasks() {
+  if (!$("#taskList")) return;
+  const nowStamp = `${localISODate()}T${pad2(new Date().getHours())}:${pad2(new Date().getMinutes())}`;
+  const tasks = Object.values(state.tasks).sort((a,b)=>Number(a.done)-Number(b.done) || taskDueStamp(a).localeCompare(taskDueStamp(b)));
+  const openCount = tasks.filter(t=>!t.done).length;
+  $("#taskCount").textContent = String(openCount);
+  $("#taskList").innerHTML = tasks.length ? tasks.map(task=>{
+    const overdue=!task.done && taskDueStamp(task)<nowStamp;
+    return `<div class="task-item ${task.done?"done":""}"><button class="task-check" type="button" data-task-toggle="${task.id}" title="${task.done?"Reabrir":"Concluir"}">${task.done?"✓":""}</button><div class="task-copy"><strong>${escapeHtml(task.title||"Tarefa")}</strong><small class="${overdue?"task-overdue":""}">${task.dueDate?formatDateBR(task.dueDate):"Sem data"}${task.dueTime?` · ${task.dueTime}`:""}${overdue?" · ATRASADA":""}</small></div><button class="task-delete" type="button" data-task-delete="${task.id}" title="Excluir">×</button></div>`;
+  }).join("") : `<div class="assistant-loading">Nenhuma tarefa aberta. Bom sinal.</div>`;
+}
+
+async function addTask() {
+  const title=$("#taskTitleInput")?.value.trim(); if(!title){showToast("Digite uma tarefa.");return;}
+  const dueDate=$("#taskDateInput")?.value||""; const dueTime=$("#taskTimeInput")?.value||"";
+  await addDoc(collection(db,"users",state.user.uid,"tasks"),{title,dueDate,dueTime,done:false,createdAt:serverTimestamp(),updatedAt:serverTimestamp(),updatedBy:state.user.uid});
+  $("#taskTitleInput").value=""; showToast("Tarefa adicionada ao Assistente.");
+}
+async function toggleTask(taskId){const task=state.tasks[taskId];if(!task)return;await updateDoc(doc(db,"users",state.user.uid,"tasks",taskId),{done:!task.done,updatedAt:serverTimestamp(),updatedBy:state.user.uid});}
+async function deleteTaskById(taskId){await deleteDoc(doc(db,"users",state.user.uid,"tasks",taskId));}
+
+function workRoutineFor(date=new Date()) {
+  const friday=date.getDay()===5;
+  return [
+    {time:"09:30",title:"Pausa de 10 minutos",detail:"Retorno às 09:40",key:"break-morning"},
+    {time:"12:20",title:"Almoço",detail:"Intervalo de almoço",key:"lunch"},
+    {time:"13:20",title:"Volta do almoço",detail:"Retomar atendimentos e monitoramento",key:"lunch-return"},
+    {time:"15:00",title:"Pausa de 10 minutos",detail:"Retorno às 15:10",key:"break-afternoon"},
+    {time:friday?"16:20":"17:20",title:"Fim do expediente",detail:friday?"Sexta-feira · saída às 16:20":"Saída às 17:20",key:"end-work"}
+  ];
+}
+function renderRoutineTimeline(){if(!$("#routineTimeline"))return;const now=minutesOfDay();const items=workRoutineFor();$("#routineTimeline").innerHTML=items.map((item,i)=>{const t=hhmmToMinutes(item.time);const next=items.find(x=>hhmmToMinutes(x.time)>=now);return `<div class="routine-item ${next===item?"current":""}"><span class="routine-time">${item.time}</span><i class="routine-dot"></i><div class="routine-copy"><strong>${item.title}</strong><small>${item.detail}</small></div></div>`}).join("");}
+
+function notifyUser(title,body){showToast(body||title);if("Notification" in window && Notification.permission==="granted"){try{new Notification(title,{body,icon:""});}catch{}}}
+async function requestBrowserNotifications(){if(!("Notification" in window)){showToast("Este navegador não oferece notificações Web.");return;}const result=await Notification.requestPermission();showToast(result==="granted"?"Notificações ativadas.":"Notificações não foram autorizadas.");}
+
+function waterDueInfo(){const interval=Number(state.assistantSettings?.waterIntervalMinutes||90);const last=state.assistantSettings?.lastWaterAt?new Date(state.assistantSettings.lastWaterAt):null;const now=new Date();if(!last)return{due:true,next:null,minutes:0};const next=new Date(last.getTime()+interval*60000);return{due:now>=next,next,minutes:Math.max(0,Math.ceil((next-now)/60000))};}
+function renderWaterStatus(){if(!$("#waterStatusText"))return;const info=waterDueInfo();if(info.due){$("#waterStatusText").textContent="Hora de beber água. Registre quando beber para reiniciar o lembrete.";}else{$("#waterStatusText").textContent=`Próximo lembrete em aproximadamente ${info.minutes} min · ${pad2(info.next.getHours())}:${pad2(info.next.getMinutes())}.`;}}
+async function registerWater(){await saveAssistantSetting({lastWaterAt:new Date().toISOString(),waterIntervalMinutes:Number($("#waterIntervalSelect").value||90)});showToast("Água registrada. Próximo lembrete programado.");}
+
+function sessionAlertKey(key,time,date=localISODate()){return `mfs-alert:${date}:${key}:${time}`;}
+function checkScheduledAlerts(){if(!state.user||!state.profile)return;const now=new Date();const hm=`${pad2(now.getHours())}:${pad2(now.getMinutes())}`;for(const item of workRoutineFor(now)){if(hm!==item.time)continue;const key=sessionAlertKey(item.key,item.time);if(sessionStorage.getItem(key))continue;sessionStorage.setItem(key,"1");notifyUser(`MFS · ${item.title}`,item.detail);}const water=waterDueInfo();if(water.due){const bucket=Math.floor(Date.now()/(30*60*1000));const key=`mfs-water:${bucket}`;if(!sessionStorage.getItem(key)){sessionStorage.setItem(key,"1");notifyUser("MFS · Hora da água","Reserve um minuto para beber água e depois registre no Assistente.");}}checkTaskAlerts();}
+function checkTaskAlerts(){const now=new Date();const today=localISODate();const hm=`${pad2(now.getHours())}:${pad2(now.getMinutes())}`;Object.values(state.tasks).forEach(task=>{if(task.done||task.dueDate!==today||!task.dueTime||task.dueTime!==hm)return;const key=sessionAlertKey(`task-${task.id}`,hm);if(sessionStorage.getItem(key))return;sessionStorage.setItem(key,"1");notifyUser("MFS · Tarefa agora",task.title||"Você tem uma tarefa agendada.");});}
+
+async function refreshAssistantStatus(){if(!state.user||!state.profile)return;try{const today=localISODate();const yesterday=addDaysToDateKey(today,-1);const checks=[{date:yesterday,shift:"noite",label:"Noite de ontem",due:"08:00"},{date:today,shift:"manha",label:"Manhã",due:"12:00"},{date:today,shift:"integral",label:"Integral",due:"12:00"},{date:today,shift:"tarde",label:"Tarde",due:"15:30"}];const snaps=await Promise.all(checks.map(item=>getDoc(doc(db,"dailyRuns",`${item.date}_${item.shift}`))));const now=minutesOfDay();const results=checks.map((item,i)=>({...item,done:snaps[i].exists(),overdue:!snaps[i].exists()&&now>=hhmmToMinutes(item.due)}));state.assistantOps=results;renderAssistantChecklist();await renderCalendarAlerts();updateAssistantNextAction();}catch(error){console.error("Falha ao atualizar Assistente:",error);}}
+function renderAssistantChecklist(){if(!$("#assistantChecklist"))return;const items=state.assistantOps||[];$("#assistantChecklist").innerHTML=items.map(item=>{const cls=item.done?"done":item.overdue?"pending":"wait";const icon=item.done?"✓":item.overdue?"!":"◷";const text=item.done?"Importado":item.overdue?"Atrasado":"Aguardando horário";return `<div class="assistant-check-item"><span class="assistant-check-icon ${cls}">${icon}</span><div class="assistant-check-copy"><strong>${item.label}</strong><small>${item.date===localISODate()?"Hoje":formatDateBR(item.date)} · conferir até ${item.due}</small></div><span class="assistant-check-badge">${text}</span></div>`}).join("");}
+function updateAssistantNextAction(){const now=minutesOfDay();const overdue=(state.assistantOps||[]).filter(i=>i.overdue&&!i.done);let title="Rotina em dia";let sub="Continue usando o MFS para registrar as próximas atualizações.";if(overdue.length){title=`${overdue.length} atualização(ões) atrasada(s)`;sub=`Prioridade: ${overdue.map(x=>x.label).join(", ")}. Abra CSV diário e atualize quando possível.`;}else{const nextOps=(state.assistantOps||[]).filter(i=>!i.done&&hhmmToMinutes(i.due)>now).sort((a,b)=>hhmmToMinutes(a.due)-hhmmToMinutes(b.due));const nextRoutine=workRoutineFor().filter(i=>hhmmToMinutes(i.time)>now).sort((a,b)=>hhmmToMinutes(a.time)-hhmmToMinutes(b.time))[0];const nextOp=nextOps[0];if(nextOp&&(!nextRoutine||hhmmToMinutes(nextOp.due)<=hhmmToMinutes(nextRoutine.time))){title=`${nextOp.label} · até ${nextOp.due}`;sub="O Assistente vai sinalizar se esse turno continuar sem importação depois do horário.";}else if(nextRoutine){title=`${nextRoutine.time} · ${nextRoutine.title}`;sub=nextRoutine.detail;}}if($("#assistantNextAction"))$("#assistantNextAction").innerHTML=`<span>Próxima ação</span><strong>${escapeHtml(title)}</strong>`;if($("#assistantNextText"))$("#assistantNextText").textContent=sub;if($("#assistantTopText"))$("#assistantTopText").textContent=overdue.length?`${overdue.length} pendência(s) de rotina`:"Assistente";if($("#assistantTopSub"))$("#assistantTopSub").textContent=overdue.length?overdue.map(x=>x.label).join(" · "):title;}
+
+function subscribeAssistantEvents(){if(typeof state.unsubAssistantEvents==="function")state.unsubAssistantEvents();state.unsubAssistantEvents=onSnapshot(collection(db,"assistantEvents"),snapshot=>{const events={};snapshot.forEach(s=>events[s.id]={id:s.id,...s.data()});state.assistantEvents=events;renderCalendarAlerts();},error=>console.error("Falha ao carregar eventos:",error));}
+async function addAssistantEvent(){if(!isAdmin())return;const title=$("#eventTitleInput")?.value.trim(),date=$("#eventDateInput")?.value,time=$("#eventTimeInput")?.value||"";if(!title||!date){showToast("Informe título e data do evento.");return;}await addDoc(collection(db,"assistantEvents"),{title,date,time,active:true,createdAt:serverTimestamp(),createdBy:state.user.uid,updatedAt:serverTimestamp(),updatedBy:state.user.uid});$("#eventTitleInput").value="";showToast("Evento compartilhado adicionado.");}
+async function renderCalendarAlerts(){if(!$("#calendarAlerts"))return;const today=localISODate();const tomorrow=addDaysToDateKey(today,1);const relevant=Object.values(state.assistantEvents).filter(e=>e.active!==false&&[today,tomorrow].includes(e.date)).sort((a,b)=>(a.date+a.time).localeCompare(b.date+b.time));let occurrenceRows=[];try{const month=today.slice(0,7);const records=month===state.month?state.records:await getMonthRecordsOnce(month);const day=String(Number(today.slice(-2)));const grouped=new Map();Object.entries(records).forEach(([id,record])=>{const reason=record?.n?.[day];if(reason){const key=reason;if(!grouped.has(key))grouped.set(key,[]);grouped.get(key).push(state.schools[id]?.name||id);}});occurrenceRows=[...grouped.entries()].map(([reason,schools])=>({title:reason,date:today,time:"",detail:`${schools.length} escola(s) com ocorrência no calendário`}));}catch{}const all=[...relevant.map(e=>({...e,detail:e.detail||"Evento compartilhado"})),...occurrenceRows];$("#calendarAlerts").innerHTML=all.length?all.map(e=>`<div class="calendar-alert"><strong>${escapeHtml(e.title)}</strong><span>${e.date===today?"Hoje":"Amanhã"}${e.time?` · ${e.time}`:""} · ${escapeHtml(e.detail||"")}</span></div>`).join(""):`<div class="assistant-loading">Nenhum evento ou ocorrência relevante para hoje e amanhã.</div>`;}
+
+function selectionKey(schoolId,day,shift){return `${schoolId}|${day}|${shift}`;}
+function selectPendingChip(button){if(button?.dataset.statusChar!=="R")return;const key=button.dataset.selectionKey||selectionKey(button.dataset.schoolId,button.dataset.day,button.dataset.shift);state.bulkSelection.set(key,{schoolId:button.dataset.schoolId,day:Number(button.dataset.day),shift:button.dataset.shift,month:state.month});button.classList.add("bulk-selected");}
+function clearBulkSelection(){state.bulkSelection.clear();$$('.status-chip.bulk-selected').forEach(el=>el.classList.remove('bulk-selected'));if($("#bulkActionBar"))$("#bulkActionBar").hidden=true;document.body.classList.remove("bulk-selecting");}
+function updateBulkBar(){const count=state.bulkSelection.size;if(!$("#bulkActionBar"))return;$("#bulkActionBar").hidden=!count;$("#bulkCount").textContent=`${count} pendência${count===1?"":"s"} selecionada${count===1?"":"s"}`;}
+function beginPendingDrag(event,button){if(event.button!==0||button.dataset.statusChar!=="R")return;event.preventDefault();state.dragSelection={active:true,moved:false,startKey:button.dataset.selectionKey};clearBulkSelection();state.dragSelection={active:true,moved:false,startKey:button.dataset.selectionKey};selectPendingChip(button);document.body.classList.add("bulk-selecting");}
+function movePendingDrag(button){if(!state.dragSelection?.active||button.dataset.statusChar!=="R")return;const key=button.dataset.selectionKey;if(key!==state.dragSelection.startKey)state.dragSelection.moved=true;selectPendingChip(button);}
+function finishPendingDrag(){if(!state.dragSelection?.active)return;const moved=state.dragSelection.moved;state.dragSelection=null;document.body.classList.remove("bulk-selecting");if(moved){state.suppressStatusClickUntil=Date.now()+350;updateBulkBar();}else{clearBulkSelection();}}
+
+function bulkChargeMessages(){const groups=new Map();for(const item of state.bulkSelection.values()){if(!groups.has(item.schoolId))groups.set(item.schoolId,{schoolId:item.schoolId,schoolName:state.schools[item.schoolId]?.name||item.schoolId,dates:new Map()});const g=groups.get(item.schoolId);const date=`${item.month}-${pad2(item.day)}`;if(!g.dates.has(date))g.dates.set(date,[]);g.dates.get(date).push(item.shift);}return [...groups.values()].map(group=>{const greeting=greetingByTime();const pieces=[...group.dates.entries()].sort().map(([date,shifts])=>`${date===localISODate()?"hoje":formatDateBR(date)} (${naturalShiftText(shifts)})`);const datesText=pieces.length===1?pieces[0]:pieces.length===2?pieces.join(" e "):`${pieces.slice(0,-1).join(", ")} e ${pieces.at(-1)}`;return `Olá, ${greeting}! Ao revisar as frequências da ${group.schoolName}, verifiquei que ainda existem pendências em ${datesText}. Você consegue confirmar para mim se essas frequências foram realizadas corretamente ou se houve algum problema? Caso ainda seja necessário algum ajuste, me avise se está disponível para eu liberar a correção e deixarmos tudo certo. Obrigado!`;});}
+function copyBulkCharges(){const messages=bulkChargeMessages();if(!messages.length)return;copyText(messages.join("\n\n--------------------\n\n"));showToast(`${messages.length} cobrança(s) gerada(s) a partir da seleção.`);}
+
+async function applyBulkStatus(){if(!state.bulkSelection.size)return;const after=$("#bulkStatusSelect").value;const reason=$("#bulkReasonInput").value.trim();const grouped=new Map();for(const item of state.bulkSelection.values()){if(!grouped.has(item.schoolId))grouped.set(item.schoolId,[]);grouped.get(item.schoolId).push(item);}const operations=[];for(const [schoolId,items] of grouped){const current=clone(state.records[schoolId]||{s:{},r:{}});current.r ||= {};for(const item of items){setStatusChar(current,item.shift,item.day,after,item.month);current.r[String(item.day)] ||= {};if(reason&&after!==".")current.r[String(item.day)][item.shift]=reason;else delete current.r[String(item.day)][item.shift];if(!Object.keys(current.r[String(item.day)]).length)delete current.r[String(item.day)];}operations.push(batch=>batch.set(doc(db,"months",state.month,"schools",schoolId),{schoolId,month:state.month,s:current.s||{},r:current.r||{},n:current.n||{},source:"bulk_manual",updatedAt:serverTimestamp(),updatedBy:state.user.uid},{merge:true}));}
+  try{await commitWriteOperationsInChunks(operations);await addDoc(collection(db,"auditLogs"),{type:"bulk_status",month:state.month,count:state.bulkSelection.size,after,reason,createdAt:serverTimestamp(),createdBy:state.user.uid,createdByEmail:state.user.email||""});clearBulkSelection();showToast("Alteração em massa aplicada.");}catch(error){console.error(error);showToast("Não foi possível aplicar a alteração em massa.");}}
+
+function onlyDigits(value){return String(value||"").replace(/\D/g,"");}
+function openWhatsapp(phone){const digits=onlyDigits(phone);if(!digits){showToast("Informe um número de WhatsApp.");return;}window.open(`https://wa.me/${digits}`,"_blank","noopener,noreferrer");}
+function bytesToBase64(bytes){let binary="";bytes.forEach(b=>binary+=String.fromCharCode(b));return btoa(binary);}
+function base64ToBytes(value){const binary=atob(value);return Uint8Array.from(binary,c=>c.charCodeAt(0));}
+async function deriveVaultKey(passphrase,salt){const enc=new TextEncoder();const material=await crypto.subtle.importKey("raw",enc.encode(passphrase),"PBKDF2",false,["deriveKey"]);return crypto.subtle.deriveKey({name:"PBKDF2",salt,iterations:250000,hash:"SHA-256"},material,{name:"AES-GCM",length:256},false,["encrypt","decrypt"]);}
+async function encryptVaultPayload(payload,passphrase){const salt=crypto.getRandomValues(new Uint8Array(16));const iv=crypto.getRandomValues(new Uint8Array(12));const key=await deriveVaultKey(passphrase,salt);const data=new TextEncoder().encode(JSON.stringify(payload));const cipher=new Uint8Array(await crypto.subtle.encrypt({name:"AES-GCM",iv},key,data));return{version:1,salt:bytesToBase64(salt),iv:bytesToBase64(iv),ciphertext:bytesToBase64(cipher)};}
+async function decryptVaultPayload(secret,passphrase){const salt=base64ToBytes(secret.salt),iv=base64ToBytes(secret.iv),cipher=base64ToBytes(secret.ciphertext);const key=await deriveVaultKey(passphrase,salt);const clear=await crypto.subtle.decrypt({name:"AES-GCM",iv},key,cipher);return JSON.parse(new TextDecoder().decode(clear));}
+async function unlockVault(){const configRef=doc(db,"vault","config");const snap=await getDoc(configRef);if(!snap.exists()){if(!isAdmin()){showToast("O cofre ainda não foi inicializado por um administrador.");return false;}const pass=prompt("Crie a senha mestre do cofre MFS. Ela NÃO será salva. Use uma senha forte e compartilhe somente com técnicos autorizados.");if(!pass||pass.length<10){showToast("Use uma senha mestre com pelo menos 10 caracteres.");return false;}const confirmPass=prompt("Digite novamente a mesma senha mestre para confirmar:");if(pass!==confirmPass){showToast("As senhas não coincidem.");return false;}const verifier=await encryptVaultPayload({ok:true,label:"MFS_VAULT"},pass);await setDoc(configRef,{...verifier,createdAt:serverTimestamp(),createdBy:state.user.uid,updatedAt:serverTimestamp(),updatedBy:state.user.uid});state.vaultPassphrase=pass;showToast("Cofre inicializado e desbloqueado nesta sessão.");return true;}const pass=prompt("Senha mestre do cofre MFS:");if(!pass)return false;try{const result=await decryptVaultPayload(snap.data(),pass);if(!result?.ok)throw new Error("invalid");state.vaultPassphrase=pass;showToast("Cofre desbloqueado nesta sessão.");return true;}catch{showToast("Senha mestre incorreta.");return false;}}
+
+async function openSchoolProfile(schoolId){state.schoolProfileId=schoolId;const meta=state.schools[schoolId]||{};$("#profileSchoolName").textContent=meta.name||schoolId;$("#profileSchoolMeta").textContent=[meta.area,meta.city,meta.inep?`INEP ${meta.inep}`:""].filter(Boolean).join(" · ");const [profileSnap,secretSnap]=await Promise.all([getDoc(doc(db,"schoolProfiles",schoolId)),getDoc(doc(db,"schoolSecrets",schoolId))]);const profile=profileSnap.exists()?profileSnap.data():{};state.schoolProfileData=profile;$("#profileDirectorName").value=profile.directorName||"";$("#profileDirectorPhone").value=profile.directorPhone||"";$("#profileOperatorName").value=profile.operatorName||"";$("#profileOperatorPhone").value=profile.operatorPhone||"";$("#profileAnyDesk").value=profile.anydeskId||"";$("#profileNotes").value=profile.notes||"";state.schoolCredentials=[];if(secretSnap.exists()&&state.vaultPassphrase){try{const payload=await decryptVaultPayload(secretSnap.data(),state.vaultPassphrase);state.schoolCredentials=Array.isArray(payload.credentials)?payload.credentials:[];}catch{state.vaultPassphrase=null;}}renderCredentials();updateVaultStatus();$("#schoolProfileModal").classList.add("open");$("#schoolProfileModal").setAttribute("aria-hidden","false");}
+function closeSchoolProfile(){state.schoolProfileId=null;$("#schoolProfileModal").classList.remove("open");$("#schoolProfileModal").setAttribute("aria-hidden","true");}
+function updateVaultStatus(){if(!$("#vaultStatusText"))return;$("#vaultStatusText").textContent=state.vaultPassphrase?"Cofre desbloqueado nesta sessão":"Cofre bloqueado";$("#unlockVaultButton").textContent=state.vaultPassphrase?"Desbloqueado":"Desbloquear cofre";}
+function renderCredentials(){if(!$("#credentialList"))return;$("#credentialList").innerHTML=state.schoolCredentials.length?state.schoolCredentials.map((cred,index)=>`<div class="credential-row" data-cred-index="${index}"><div class="credential-grid"><input data-cred-field="name" value="${escapeHtml(cred.name||"")}" placeholder="Plataforma" /><input data-cred-field="url" value="${escapeHtml(cred.url||"")}" placeholder="https://..." /><input data-cred-field="username" value="${escapeHtml(cred.username||"")}" placeholder="Login" /><input data-cred-field="password" type="password" value="${escapeHtml(cred.password||"")}" placeholder="Senha" /><button class="credential-action credential-remove" type="button" data-remove-credential="${index}">×</button></div><div class="credential-copy-row"><button class="credential-action" type="button" data-open-credential="${index}">Abrir</button><button class="credential-action" type="button" data-copy-user="${index}">Copiar login</button><button class="credential-action" type="button" data-copy-pass="${index}">Copiar senha</button></div></div>`).join(""):`<div class="assistant-loading">${state.vaultPassphrase?"Nenhum acesso cadastrado para esta escola.":"Desbloqueie o cofre para visualizar ou cadastrar acessos."}</div>`;}
+function syncCredentialDraftFromDom(){const rows=$$("#credentialList .credential-row");if(!rows.length)return;state.schoolCredentials=rows.map(row=>({name:row.querySelector('[data-cred-field="name"]')?.value.trim()||"",url:row.querySelector('[data-cred-field="url"]')?.value.trim()||"",username:row.querySelector('[data-cred-field="username"]')?.value||"",password:row.querySelector('[data-cred-field="password"]')?.value||""}));}
+async function ensureVaultForProfile(){if(state.vaultPassphrase)return true;const ok=await unlockVault();if(ok&&state.schoolProfileId){const snap=await getDoc(doc(db,"schoolSecrets",state.schoolProfileId));if(snap.exists()){try{const payload=await decryptVaultPayload(snap.data(),state.vaultPassphrase);state.schoolCredentials=Array.isArray(payload.credentials)?payload.credentials:[];}catch{showToast("Não foi possível abrir os acessos desta escola.");return false;}}renderCredentials();updateVaultStatus();return true;}return false;}
+async function saveSchoolProfile(){const schoolId=state.schoolProfileId;if(!schoolId)return;syncCredentialDraftFromDom();const profile={schoolId,directorName:$("#profileDirectorName").value.trim(),directorPhone:$("#profileDirectorPhone").value.trim(),operatorName:$("#profileOperatorName").value.trim(),operatorPhone:$("#profileOperatorPhone").value.trim(),anydeskId:$("#profileAnyDesk").value.trim(),notes:$("#profileNotes").value.trim(),updatedAt:serverTimestamp(),updatedBy:state.user.uid};try{await setDoc(doc(db,"schoolProfiles",schoolId),profile,{merge:true});if(state.vaultPassphrase){const secret=await encryptVaultPayload({credentials:state.schoolCredentials},state.vaultPassphrase);await setDoc(doc(db,"schoolSecrets",schoolId),{schoolId,...secret,updatedAt:serverTimestamp(),updatedBy:state.user.uid},{merge:true});}await addDoc(collection(db,"auditLogs"),{type:"school_profile_updated",schoolId,createdAt:serverTimestamp(),createdBy:state.user.uid,createdByEmail:state.user.email||""});closeSchoolProfile();showToast("Perfil da escola salvo.");}catch(error){console.error(error);showToast("Não foi possível salvar o perfil da escola.");}}
+
 
 async function loadUserManagement() {
   if(!isAdmin())return;
@@ -1177,10 +1374,11 @@ function switchView(view) {
   if ((view==="import"||view==="users")&&!isAdmin()) return;
   $$(".nav-button").forEach(btn=>btn.classList.toggle("active",btn.dataset.view===view));
   $$(".view").forEach(panel=>panel.classList.toggle("active",panel.dataset.viewPanel===view));
-  const labels={monitor:"Acompanhamento",daily:"CSV diário",import:"Monitora",users:"Usuários"};
+  const labels={monitor:"Acompanhamento",daily:"CSV diário",assistant:"Assistente",import:"Monitora",users:"Usuários"};
   $("#workspaceTitle").textContent=labels[view]||"MFS";
   $("#sidebar").classList.remove("open");
   if(view==="users")loadUserManagement();
+  if(view==="assistant")refreshAssistantStatus();
 }
 
 function bindEvents() {
@@ -1197,7 +1395,15 @@ function bindEvents() {
   $("#schoolSearch")?.addEventListener("input",event=>{state.search=event.target.value;renderMonitor();});
   $("#shiftFilter")?.addEventListener("change",event=>{state.shift=event.target.value;renderMonitor();});
   $("#statusFilter")?.addEventListener("change",event=>{state.status=event.target.value;renderMonitor();});
-  $("#schoolList")?.addEventListener("click",event=>{const button=event.target.closest("[data-edit-status]");if(button)openStatusEditor(button.dataset.schoolId,button.dataset.day,button.dataset.shift);});
+  $("#schoolList")?.addEventListener("click",event=>{
+    const profileButton=event.target.closest("[data-school-profile]");
+    if(profileButton){openSchoolProfile(profileButton.dataset.schoolProfile);return;}
+    const button=event.target.closest("[data-edit-status]");
+    if(button){if(Date.now()<state.suppressStatusClickUntil)return;openStatusEditor(button.dataset.schoolId,button.dataset.day,button.dataset.shift);}
+  });
+  $("#schoolList")?.addEventListener("pointerdown",event=>{const button=event.target.closest('.status-chip[data-status-char="R"]');if(button)beginPendingDrag(event,button);});
+  $("#schoolList")?.addEventListener("pointerover",event=>{const button=event.target.closest('.status-chip[data-status-char="R"]');if(button)movePendingDrag(button);});
+  document.addEventListener("pointerup",finishPendingDrag);
   $("#closeEditor")?.addEventListener("click",closeStatusEditor);
   $("#cancelEditor")?.addEventListener("click",closeStatusEditor);
   $("#statusModal")?.addEventListener("click",event=>{if(event.target.id==="statusModal")closeStatusEditor();});
@@ -1225,8 +1431,33 @@ function bindEvents() {
   ["dragleave","drop"].forEach(name=>csvDrop?.addEventListener(name,event=>{event.preventDefault();csvDrop.classList.remove("drag");}));
   csvDrop?.addEventListener("drop",event=>{const file=event.dataTransfer.files?.[0];if(file)processDailyFile(file);});
 
+
+  $("#assistantTopButton")?.addEventListener("click",()=>switchView("assistant"));
+  $("#refreshAssistantButton")?.addEventListener("click",refreshAssistantStatus);
+  $("#notificationButton")?.addEventListener("click",requestBrowserNotifications);
+  $("#waterDoneButton")?.addEventListener("click",registerWater);
+  $("#waterIntervalSelect")?.addEventListener("change",event=>saveAssistantSetting({waterIntervalMinutes:Number(event.target.value)}));
+  $("#addTaskButton")?.addEventListener("click",addTask);
+  $("#taskTitleInput")?.addEventListener("keydown",event=>{if(event.key==="Enter")addTask();});
+  $("#taskList")?.addEventListener("click",event=>{const toggle=event.target.closest("[data-task-toggle]");if(toggle){toggleTask(toggle.dataset.taskToggle);return;}const del=event.target.closest("[data-task-delete]");if(del)deleteTaskById(del.dataset.taskDelete);});
+  $("#addEventButton")?.addEventListener("click",addAssistantEvent);
+  $("#bulkChargeButton")?.addEventListener("click",copyBulkCharges);
+  $("#bulkApplyButton")?.addEventListener("click",applyBulkStatus);
+  $("#bulkClearButton")?.addEventListener("click",clearBulkSelection);
+  $("#closeSchoolProfile")?.addEventListener("click",closeSchoolProfile);
+  $("#cancelSchoolProfile")?.addEventListener("click",closeSchoolProfile);
+  $("#saveSchoolProfile")?.addEventListener("click",saveSchoolProfile);
+  $("#schoolProfileModal")?.addEventListener("click",event=>{if(event.target.id==="schoolProfileModal")closeSchoolProfile();});
+  $$(".profile-tab").forEach(button=>button.addEventListener("click",()=>{$$(".profile-tab").forEach(x=>x.classList.toggle("active",x===button));$$(".profile-tab-panel").forEach(panel=>panel.classList.toggle("active",panel.dataset.profilePanel===button.dataset.profileTab));}));
+  $("#unlockVaultButton")?.addEventListener("click",ensureVaultForProfile);
+  $("#addCredentialButton")?.addEventListener("click",async()=>{if(!(await ensureVaultForProfile()))return;syncCredentialDraftFromDom();state.schoolCredentials.push({name:"",url:"",username:"",password:""});renderCredentials();});
+  $("#credentialList")?.addEventListener("click",event=>{const row=event.target.closest(".credential-row");if(!row)return;syncCredentialDraftFromDom();const index=Number(row.dataset.credIndex);if(event.target.closest("[data-remove-credential]")){state.schoolCredentials.splice(index,1);renderCredentials();return;}if(event.target.closest("[data-copy-user]")){copyText(state.schoolCredentials[index]?.username||"");return;}if(event.target.closest("[data-copy-pass]")){copyText(state.schoolCredentials[index]?.password||"");return;}if(event.target.closest("[data-open-credential]")){const url=state.schoolCredentials[index]?.url;if(url)window.open(url,"_blank","noopener,noreferrer");}});
+  $("#directorWhatsappButton")?.addEventListener("click",()=>openWhatsapp($("#profileDirectorPhone").value));
+  $("#operatorWhatsappButton")?.addEventListener("click",()=>openWhatsapp($("#profileOperatorPhone").value));
+  $("#copyAnyDeskButton")?.addEventListener("click",()=>copyText($("#profileAnyDesk").value));
+
   $("#refreshUsers")?.addEventListener("click",loadUserManagement);
-  document.addEventListener("keydown",event=>{if(event.key==="Escape"&&$("#statusModal")?.classList.contains("open"))closeStatusEditor();});
+  document.addEventListener("keydown",event=>{if(event.key!=="Escape")return;if($("#statusModal")?.classList.contains("open"))closeStatusEditor();if($("#schoolProfileModal")?.classList.contains("open"))closeSchoolProfile();});
 }
 
 bindEvents();

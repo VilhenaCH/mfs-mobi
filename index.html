@@ -7,7 +7,7 @@
   <meta name="description" content="MFS - Monitoramento de Frequência Supremo, Mobieduca.me" />
   <meta name="robots" content="noindex,nofollow,noarchive" />
   <title>MFS · Monitoramento de Frequência Supremo</title>
-  <link rel="stylesheet" href="style.css?v=0.5.0" />
+  <link rel="stylesheet" href="style.css?v=0.6.0" />
 </head>
 <body>
   <div class="ambient ambient-a"></div>
@@ -84,6 +84,10 @@
           <span class="nav-icon">↥</span>
           <span><b>CSV diário</b><small>Atualizar e cobrar</small></span>
         </button>
+        <button class="nav-button" data-view="assistant" type="button">
+          <span class="nav-icon">✦</span>
+          <span><b>Assistente</b><small>Rotina, tarefas e alertas</small></span>
+        </button>
         <button class="nav-button admin-only" data-view="import" type="button" hidden>
           <span class="nav-icon">↻</span>
           <span><b>Monitora</b><small>Sincronizar retroativo</small></span>
@@ -96,7 +100,7 @@
 
       <div class="sidebar-bottom">
         <div class="storage-chip"><span class="pulse-dot"></span><div><strong>Cloud Firestore</strong><small>Sincronização protegida</small></div></div>
-        <div class="version">MFS v0.5.2 · Firebase</div>
+        <div class="version">MFS v0.6.0 · Assistente Supremo</div>
       </div>
     </aside>
 
@@ -109,6 +113,14 @@
         <div class="topbar-actions">
           <button class="quick-action ghost admin-only" type="button" data-go-view="import" hidden>↻ Monitora</button>
           <button class="quick-action primary" type="button" data-go-view="daily">＋ CSV diário</button>
+          <button class="assistant-top-button" id="assistantTopButton" type="button" data-go-view="assistant" title="Abrir Assistente">
+            <span class="assistant-orb">✦</span>
+            <span><strong id="assistantTopText">Assistente</strong><small id="assistantTopSub">verificando rotina...</small></span>
+          </button>
+          <div class="top-clock" aria-label="Relógio do sistema">
+            <span id="topClockTime">00:00:00</span>
+            <small id="topClockDate">--/--/----</small>
+          </div>
           <button class="user-menu-button" id="userMenuButton" type="button" title="Sair">
             <img id="userAvatar" alt="" />
             <span><strong id="userName">Usuário</strong><small id="userRole">—</small></span>
@@ -132,11 +144,28 @@
 
           <div class="summary-grid" id="summaryGrid"></div>
           <div class="section-head">
-            <div><p class="eyebrow">Escolas</p><h3>Calendário de frequência</h3><p class="muted">Clique em qualquer turno para editar o status manualmente.</p></div>
+            <div><p class="eyebrow">Escolas</p><h3>Calendário de frequência</h3><p class="muted">Clique em qualquer turno para editar. Para ações em massa, segure e arraste sobre blocos vermelhos pendentes.</p></div>
             <div class="legend"><span><i class="swatch sent"></i> Frequência</span><span><i class="swatch pending"></i> Pendente</span><span><i class="swatch justified"></i> Justificada</span><span><i class="swatch no-school"></i> Não letivo</span><span><i class="swatch blank"></i> Sem registro</span></div>
           </div>
           <div id="resultMeta" class="result-meta"></div>
           <div id="schoolList" class="school-list"></div>
+
+          <div class="bulk-action-bar" id="bulkActionBar" hidden>
+            <div class="bulk-summary"><span class="bulk-icon">⌁</span><div><strong id="bulkCount">0 pendências selecionadas</strong><small>Seleção por arraste · somente blocos pendentes</small></div></div>
+            <div class="bulk-controls">
+              <button class="button ghost" id="bulkChargeButton" type="button">Gerar cobrança</button>
+              <select id="bulkStatusSelect" aria-label="Situação em massa">
+                <option value="G">Com frequência</option>
+                <option value="J">Justificada</option>
+                <option value="X">Não letivo</option>
+                <option value="R">Pendente</option>
+                <option value=".">Sem registro</option>
+              </select>
+              <input id="bulkReasonInput" type="text" placeholder="Motivo/observação opcional" />
+              <button class="button primary" id="bulkApplyButton" type="button">Aplicar em massa</button>
+              <button class="bulk-clear" id="bulkClearButton" type="button" aria-label="Limpar seleção">×</button>
+            </div>
+          </div>
         </section>
 
         <section class="view" id="view-daily" data-view-panel="daily">
@@ -151,6 +180,69 @@
             <article class="card preview-card"><div class="card-title-row"><div><p class="eyebrow">Validação</p><h3 id="dailyPreviewTitle">Nenhum arquivo selecionado</h3></div><span class="step-badge">02</span></div><div id="dailyPreview" class="empty-preview"><div class="preview-icon">CSV</div><strong>Aguardando arquivo</strong><span>Confira o resultado antes de gravar.</span></div></article>
           </div>
           <section class="card charge-card"><div class="charge-head"><div><p class="eyebrow">Cobrança diária</p><h3 id="chargeTitle">Pendências do dia</h3><p class="muted" id="chargeSubtitle">Importe os turnos para consolidar as cobranças.</p></div><button class="button ghost" id="copyAllCharges" type="button" disabled>Copiar todas</button></div><div id="chargeList" class="charge-list"><div class="empty-preview small-empty"><strong>Nenhuma cobrança carregada</strong><span>As escolas pendentes aparecerão aqui.</span></div></div></section>
+        </section>
+
+
+        <section class="view" id="view-assistant" data-view-panel="assistant">
+          <div class="assistant-hero card">
+            <div class="assistant-hero-copy">
+              <p class="eyebrow">Assistente Supremo</p>
+              <h2 id="assistantGreeting">Bom dia</h2>
+              <p id="assistantNextText" class="muted">Analisando sua rotina e as atualizações do dia...</p>
+              <div class="assistant-next-action" id="assistantNextAction"><span>Próxima ação</span><strong>Carregando...</strong></div>
+            </div>
+            <div class="assistant-clock-large">
+              <span id="assistantClockTime">00:00:00</span>
+              <small id="assistantClockDate">--/--/----</small>
+            </div>
+          </div>
+
+          <div class="assistant-grid">
+            <article class="card assistant-panel">
+              <div class="card-title-row"><div><p class="eyebrow">Checklist operacional</p><h3>Frequências de hoje</h3></div><button class="mini-button" id="refreshAssistantButton" type="button">Atualizar</button></div>
+              <div id="assistantChecklist" class="assistant-checklist"><div class="assistant-loading">Verificando CSVs...</div></div>
+            </article>
+
+            <article class="card assistant-panel">
+              <div class="card-title-row"><div><p class="eyebrow">Expediente</p><h3>Rotina do técnico</h3></div><span class="step-badge">24H</span></div>
+              <div id="routineTimeline" class="routine-timeline"></div>
+            </article>
+
+            <article class="card assistant-panel water-panel">
+              <div class="card-title-row"><div><p class="eyebrow">Bem-estar</p><h3>Água</h3></div><span class="water-drop">◉</span></div>
+              <p id="waterStatusText" class="muted">Carregando lembrete...</p>
+              <div class="water-actions">
+                <select id="waterIntervalSelect"><option value="60">A cada 60 min</option><option value="90">A cada 90 min</option><option value="120">A cada 120 min</option></select>
+                <button class="button primary" id="waterDoneButton" type="button">Bebi água agora</button>
+              </div>
+              <button class="button ghost notification-button" id="notificationButton" type="button">Ativar notificações do navegador</button>
+              <p class="field-help">Os alertas automáticos funcionam enquanto o MFS estiver aberto. Notificações em segundo plano completo exigem uma etapa futura com Firebase Cloud Messaging.</p>
+            </article>
+
+            <article class="card assistant-panel tasks-panel">
+              <div class="card-title-row"><div><p class="eyebrow">Minhas tarefas</p><h3>Não deixar nada passar</h3></div><span class="step-badge" id="taskCount">0</span></div>
+              <div class="task-create-row">
+                <input id="taskTitleInput" type="text" placeholder="Ex.: Cobrar escola X, revisar chamado..." />
+                <input id="taskDateInput" type="date" />
+                <input id="taskTimeInput" type="time" />
+                <button class="button primary" id="addTaskButton" type="button">Adicionar</button>
+              </div>
+              <div id="taskList" class="task-list"><div class="assistant-loading">Carregando tarefas...</div></div>
+            </article>
+
+            <article class="card assistant-panel events-panel">
+              <div class="card-title-row"><div><p class="eyebrow">Calendário e eventos</p><h3>Alertas próximos</h3></div><span class="step-badge">CAL</span></div>
+              <div id="calendarAlerts" class="calendar-alerts"><div class="assistant-loading">Buscando ocorrências...</div></div>
+              <div class="admin-event-form admin-only" id="adminEventForm" hidden>
+                <div class="event-form-grid">
+                  <input id="eventTitleInput" type="text" placeholder="Evento compartilhado" />
+                  <input id="eventDateInput" type="date" />
+                  <input id="eventTimeInput" type="time" />
+                  <button class="button ghost" id="addEventButton" type="button">Adicionar evento</button>
+                </div>
+              </div>
+            </article>
+          </div>
         </section>
 
         <section class="view admin-only" id="view-import" data-view-panel="import" hidden>
@@ -190,8 +282,40 @@
     </div>
   </div>
 
+
+  <div class="modal-backdrop" id="schoolProfileModal" aria-hidden="true">
+    <div class="status-modal school-profile-modal" role="dialog" aria-modal="true" aria-labelledby="schoolProfileTitle">
+      <div class="modal-accent"></div>
+      <header class="modal-header"><div><p class="eyebrow">Perfil da escola</p><h3 id="schoolProfileTitle">Dados rápidos</h3></div><button class="modal-close" id="closeSchoolProfile" type="button" aria-label="Fechar">×</button></header>
+      <div class="profile-school-identity"><strong id="profileSchoolName">—</strong><span id="profileSchoolMeta">—</span></div>
+      <div class="profile-tabs"><button class="profile-tab active" type="button" data-profile-tab="contacts">Contatos</button><button class="profile-tab" type="button" data-profile-tab="access">Acessos</button><button class="profile-tab" type="button" data-profile-tab="remote">Remoto & notas</button></div>
+      <div class="profile-scroll">
+        <section class="profile-tab-panel active" data-profile-panel="contacts">
+          <div class="profile-form-grid">
+            <div class="field"><label>Diretor(a)</label><input id="profileDirectorName" type="text" /></div>
+            <div class="field"><label>WhatsApp do diretor</label><div class="profile-inline"><input id="profileDirectorPhone" type="tel" placeholder="86999999999" /><button class="mini-button approve" id="directorWhatsappButton" type="button">WhatsApp</button></div></div>
+            <div class="field"><label>Operador(a) Mobi</label><input id="profileOperatorName" type="text" /></div>
+            <div class="field"><label>WhatsApp do operador</label><div class="profile-inline"><input id="profileOperatorPhone" type="tel" placeholder="86999999999" /><button class="mini-button approve" id="operatorWhatsappButton" type="button">WhatsApp</button></div></div>
+          </div>
+        </section>
+        <section class="profile-tab-panel" data-profile-panel="access">
+          <div class="vault-banner"><div><strong id="vaultStatusText">Cofre bloqueado</strong><span>As senhas ficam criptografadas antes de ir para o Firestore.</span></div><button class="button ghost" id="unlockVaultButton" type="button">Desbloquear cofre</button></div>
+          <div id="credentialList" class="credential-list"></div>
+          <button class="button ghost" id="addCredentialButton" type="button">＋ Adicionar plataforma</button>
+        </section>
+        <section class="profile-tab-panel" data-profile-panel="remote">
+          <div class="profile-form-grid one-column">
+            <div class="field"><label>ID / endereço AnyDesk</label><div class="profile-inline"><input id="profileAnyDesk" type="text" /><button class="mini-button" id="copyAnyDeskButton" type="button">Copiar</button></div></div>
+            <div class="field"><label>Observações rápidas</label><textarea id="profileNotes" rows="6" placeholder="Informações úteis sobre a escola, equipamentos, horários, particularidades..."></textarea></div>
+          </div>
+        </section>
+      </div>
+      <footer class="modal-footer"><button class="button ghost" id="cancelSchoolProfile" type="button">Cancelar</button><button class="button primary" id="saveSchoolProfile" type="button">Salvar perfil</button></footer>
+    </div>
+  </div>
+
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="firebase-config.js?v=0.5.1"></script>
-  <script type="module" src="app.js?v=0.5.2"></script>
+  <script type="module" src="app.js?v=0.6.0"></script>
 </body>
 </html>
