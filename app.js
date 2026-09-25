@@ -73,6 +73,9 @@ const state = {
   suppressStatusClickUntil: 0,
   schoolProfileId: null,
   schoolProfileData: null,
+  schoolHistoryId: null,
+  schoolHistoryRecords: {},
+  schoolHistoryRequest: 0,
   schoolCredentials: [],
   vaultPassphrase: null,
   assistantSettings: { waterIntervalMinutes: 90, lastWaterAt: null },
@@ -415,6 +418,31 @@ function recordShifts(record) {
   return SHIFT_ORDER.filter(shift => record?.s?.[shift]);
 }
 
+function normalizeShiftList(list) {
+  const values = Array.isArray(list) ? list : [];
+  return SHIFT_ORDER.filter(shift => values.includes(shift));
+}
+
+function effectiveShiftsForSchool(schoolId, record = null) {
+  const meta = state.schools[schoolId] || {};
+  if (Array.isArray(meta.expectedShifts)) return normalizeShiftList(meta.expectedShifts);
+  if (Array.isArray(meta.shifts) && meta.shifts.length) return normalizeShiftList(meta.shifts);
+  return recordShifts(record || state.records[schoolId]);
+}
+
+function expectedShiftSeed(schoolId, record = null) {
+  const meta = state.schools[schoolId] || {};
+  if (Array.isArray(meta.expectedShifts)) return normalizeShiftList(meta.expectedShifts);
+  const legacy = new Set();
+  if (Array.isArray(meta.shifts)) meta.shifts.forEach(shift => { if (SHIFT_ORDER.includes(shift)) legacy.add(shift); });
+  recordShifts(record || state.records[schoolId]).forEach(shift => legacy.add(shift));
+  return SHIFT_ORDER.filter(shift => legacy.has(shift));
+}
+
+function expectedShiftLabelList(schoolId, record = null) {
+  return effectiveShiftsForSchool(schoolId, record).map(shift => SHIFT_LABELS[shift] || shift);
+}
+
 function statusChar(record, shift, day) {
   const str = record?.s?.[shift] || "";
   return str[day - 1] || ".";
@@ -557,6 +585,7 @@ function subscribeSchools() {
     const schools = {};
     snapshot.forEach(snap => { schools[snap.id] = { id: snap.id, ...snap.data() }; });
     state.schools = schools;
+    renderSchoolHistorySelector();
     scheduleMonitorRender();
     scheduleTodayPendingSync(500);
   }, error => {
@@ -571,6 +600,7 @@ function subscribeMonths() {
     snapshot.forEach(snap => { months[snap.id] = { id: snap.id, ...snap.data() }; });
     state.months = months;
     renderMonthSelect();
+    renderSchoolHistorySelector();
     scheduleMonitorRender();
   }, error => console.error("Falha ao carregar meses:", error));
 }
@@ -617,10 +647,12 @@ function renderMonthSelect() {
 
 function countStatuses(records, shiftFilter = "TODOS") {
   const counts = { G:0, R:0, J:0, X:0, ".":0 };
-  Object.values(records || {}).forEach(record => {
-    const shifts = shiftFilter === "TODOS" ? recordShifts(record) : [shiftFilter].filter(s => record?.s?.[s]);
+  Object.entries(records || {}).forEach(([schoolId, record]) => {
+    const expected = effectiveShiftsForSchool(schoolId, record);
+    const shifts = shiftFilter === "TODOS" ? expected : [shiftFilter].filter(s => expected.includes(s));
     shifts.forEach(shift => {
-      for (const ch of record?.s?.[shift] || "") counts[ch] = (counts[ch] || 0) + 1;
+      const value = record?.s?.[shift] || "";
+      for (const ch of value) counts[ch] = (counts[ch] || 0) + 1;
     });
   });
   return counts;
@@ -629,8 +661,8 @@ function countStatuses(records, shiftFilter = "TODOS") {
 function latestDataDay(records, month) {
   const max = daysInMonth(month);
   for (let day = max; day >= 1; day--) {
-    for (const record of Object.values(records || {})) {
-      for (const shift of recordShifts(record)) {
+    for (const [schoolId, record] of Object.entries(records || {})) {
+      for (const shift of effectiveShiftsForSchool(schoolId, record)) {
         const ch = statusChar(record, shift, day);
         if (["G","R","J"].includes(ch)) return day;
       }
@@ -655,16 +687,17 @@ function renderSummary() {
   }));
 }
 
-function schoolMatches(meta, record) {
+function schoolMatches(schoolId, meta, record) {
   const query = normalizeText(state.search);
   if (query) {
     const hay = normalizeText([meta?.name, meta?.area, meta?.city, meta?.inep].join(" "));
     if (!hay.includes(query)) return false;
   }
-  if (state.shift !== "TODOS" && !record?.s?.[state.shift]) return false;
+  const expected = effectiveShiftsForSchool(schoolId, record);
+  if (state.shift !== "TODOS" && !expected.includes(state.shift)) return false;
   if (state.status !== "TODOS") {
     const target = STATUS_CHAR[state.status];
-    const shifts = state.shift === "TODOS" ? recordShifts(record) : [state.shift];
+    const shifts = state.shift === "TODOS" ? expected : [state.shift].filter(shift => expected.includes(shift));
     if (!shifts.some(shift => (record?.s?.[shift] || "").includes(target))) return false;
   }
   return true;
@@ -701,9 +734,10 @@ function hydrateSchoolCalendar(card) {
   const record = state.records[schoolId];
   if (!calendar || !record) return;
 
+  const expected = effectiveShiftsForSchool(schoolId, record);
   const shifts = state.shift === "TODOS"
-    ? recordShifts(record)
-    : [state.shift].filter(shift => record?.s?.[shift]);
+    ? expected
+    : [state.shift].filter(shift => expected.includes(shift));
 
   const ndays = daysInMonth(state.month);
   calendar.innerHTML = shifts.length
@@ -782,7 +816,7 @@ function renderMonitor() {
   renderSummary();
 
   const filtered = Object.entries(state.records)
-    .filter(([id, record]) => schoolMatches(state.schools[id] || { id, name:id }, record))
+    .filter(([id, record]) => schoolMatches(id, state.schools[id] || { id, name:id }, record))
     .sort((a,b) => (state.schools[a[0]]?.name || a[0]).localeCompare(state.schools[b[0]]?.name || b[0], "pt-BR"));
   const latest = latestDataDay(state.records, state.month);
   const shiftLabel = state.shift === "TODOS" ? "todos os turnos" : SHIFT_LABELS[state.shift];
@@ -834,11 +868,14 @@ function renderCalendarHalf(id, record, shifts, month, startDay, endDay) {
 }
 
 function renderSchoolCard(id, meta, record, month) {
-  const shifts = state.shift === "TODOS" ? recordShifts(record) : [state.shift].filter(s => record?.s?.[s]);
+  const expected = effectiveShiftsForSchool(id, record);
+  const shifts = state.shift === "TODOS" ? expected : [state.shift].filter(s => expected.includes(s));
   const counts = perSchoolCounts(record, shifts);
   const nonSchool = Object.entries(record?.n || {}).map(([day, reason]) => `${day}: ${reason}`).join(" · ");
+  const expectedText = expected.length ? expected.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Nenhum turno esperado";
+  const csvDefined = Array.isArray(meta?.expectedShifts);
   return `<article class="card school-card" data-school-id="${escapeHtml(id)}" data-calendar-hydrated="0">
-    <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}</div></div><div class="school-head-actions"><button class="school-profile-button" type="button" data-school-profile="${escapeHtml(id)}">Perfil</button><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></div></header>
+    <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}<span class="meta-pill expected-shifts-pill" title="Turnos esperados definidos pelo CSV diário">${csvDefined ? "CSV" : "Legado"}: ${escapeHtml(expectedText)}</span></div></div><div class="school-head-actions"><button class="school-profile-button" type="button" data-school-history="${escapeHtml(id)}">Histórico</button><button class="school-profile-button" type="button" data-school-profile="${escapeHtml(id)}">Perfil</button><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></div></header>
     <div class="school-calendar virtual-calendar">${virtualCalendarPlaceholder()}</div>
     <div class="school-footer"><span class="hint">Clique em M, T, N ou I para editar</span><span class="non-school-note" title="${escapeHtml(nonSchool)}">${nonSchool ? `Ocorrências: ${escapeHtml(nonSchool)}` : "Sem ocorrências cadastradas"}</span></div>
   </article>`;
@@ -1326,6 +1363,21 @@ function findSchoolByCSVName(name) {
   return null;
 }
 
+
+function calculateExpectedRosterChanges(shift, mappedRows, existingRecords = {}) {
+  const rosterIds = new Set(mappedRows.filter(row => row.id).map(row => row.id));
+  let added = 0;
+  let removed = 0;
+  Object.entries(state.schools).forEach(([schoolId, meta]) => {
+    if (meta?.active === false) return;
+    const before = expectedShiftSeed(schoolId, existingRecords[schoolId]).includes(shift);
+    const after = rosterIds.has(schoolId);
+    if (!before && after) added += 1;
+    if (before && !after) removed += 1;
+  });
+  return { rosterIds:[...rosterIds], added, removed };
+}
+
 async function buildDailyPreview(fileName, rows) {
   const date=$("#dailyDate").value;
   const shift=$("#dailyShift").value;
@@ -1344,7 +1396,8 @@ async function buildDailyPreview(fileName, rows) {
     return { schoolName,director,area,frequency,beforeChar,afterChar,turmas:row.turmas||row.qtdturmas||row.quantidadeturmas||"",alunos:row.alunos||row.qtdalunos||row.quantidadealunos||"",id:match?.id||null,meta:match?.meta||null,matchConfidence:match?.confidence||"nao_reconhecida" };
   }).filter(row=>row.schoolName);
   const summary={ total:mapped.length, sent:mapped.filter(r=>r.frequency==="enviada").length, pending:mapped.filter(r=>r.frequency==="nao_enviada").length, unknownStatus:mapped.filter(r=>r.frequency==="desconhecida").length, unknownSchools:mapped.filter(r=>!r.id).length, changed:mapped.filter(r=>r.id&&r.afterChar!=="?"&&r.beforeChar!==r.afterChar).length, same:mapped.filter(r=>r.id&&r.afterChar!=="?"&&r.beforeChar===r.afterChar).length };
-  return {fileName,date,shift,month,rows:mapped,summary,existingRecords};
+  const roster=calculateExpectedRosterChanges(shift,mapped,existingRecords);
+  return {fileName,date,shift,month,rows:mapped,summary,existingRecords,roster};
 }
 
 function renderDailyPreview(parsed) {
@@ -1360,6 +1413,7 @@ function renderDailyPreview(parsed) {
     </div>
     ${summary.unknownStatus?`<div class="import-warning compact-warning">${summary.unknownStatus} registro(s) têm situação não reconhecida e serão ignorados.</div>`:""}
     ${summary.unknownSchools?`<div class="import-warning compact-warning">${summary.unknownSchools} escola(s) não existem no cadastro protegido. Importe primeiro o HTML do Monitora como administrador.</div>`:""}
+    <div class="expected-roster-preview"><strong>Turno esperado · ${SHIFT_LABELS[parsed.shift]}</strong><span>${parsed.roster?.rosterIds?.length || 0} escola(s) reconhecidas neste CSV · <b>+${parsed.roster?.added || 0}</b> entram · <b>-${parsed.roster?.removed || 0}</b> deixam de esperar este turno</span><small>Ao confirmar, este CSV passa a ser a fonte de verdade para o turno ${SHIFT_LABELS[parsed.shift]}.</small></div>
     <div class="transition-head compact-transition-head"><div><strong>Situação atual → situação após importar</strong><span>Mesmo quando o CSV mantém o mesmo status, a comparação aparece abaixo.</span></div></div>
     <div class="csv-table-wrap transition-table-wrap daily-transition-wrap">
       <table class="csv-table transition-table">
@@ -1408,6 +1462,34 @@ async function applyDailyCSV() {
     const day = Number(parsed.date.slice(-2));
     const appliedRows = [];
     const recordOperations = [];
+
+    // O CSV do turno é a fonte de verdade da grade esperada daquela escola.
+    // Quem aparece ganha o turno; quem não aparece deixa de esperar esse turno.
+    const rosterIds = new Set((parsed.roster?.rosterIds || parsed.rows.filter(row => row.id).map(row => row.id)));
+    const schoolRosterOperations = [];
+    Object.entries(state.schools).forEach(([schoolId, meta]) => {
+      if (meta?.active === false) return;
+      const currentExpected = expectedShiftSeed(schoolId, parsed.existingRecords[schoolId]);
+      const nextSet = new Set(currentExpected);
+      if (rosterIds.has(schoolId)) nextSet.add(parsed.shift);
+      else nextSet.delete(parsed.shift);
+      const nextExpected = SHIFT_ORDER.filter(shift => nextSet.has(shift));
+      const beforeJson = JSON.stringify(normalizeShiftList(meta?.expectedShifts));
+      const afterJson = JSON.stringify(nextExpected);
+      if (!Array.isArray(meta?.expectedShifts) || beforeJson !== afterJson) {
+        schoolRosterOperations.push(batch => {
+          batch.set(doc(db,"schools",schoolId), {
+            expectedShifts: nextExpected,
+            expectedShiftsUpdatedAt: serverTimestamp(),
+            expectedShiftsUpdatedBy: state.user.uid
+          }, { merge:true });
+        });
+      }
+    });
+
+    if (schoolRosterOperations.length) {
+      await commitWriteOperationsInChunks(schoolRosterOperations);
+    }
 
     parsed.rows.forEach(row => {
       if (!row.id || row.frequency === "desconhecida") return;
@@ -1477,6 +1559,8 @@ async function applyDailyCSV() {
         shift: parsed.shift,
         fileName: parsed.fileName,
         schoolIds: appliedRows.map(row => row.id),
+        expectedRosterSchoolIds: [...rosterIds],
+        expectedRosterAuthoritative: true,
         importedAt: serverTimestamp(),
         importedBy: state.user.uid,
         importedByEmail: state.user.email || "",
@@ -1544,7 +1628,7 @@ async function buildChargeGroups(date) {
   const groups=new Map();
 
   Object.entries(records).forEach(([id,record])=>{
-    recordShifts(record).forEach(shift=>{
+    effectiveShiftsForSchool(id, record).forEach(shift=>{
       if (statusChar(record,shift,day)!=="R") return;
       const meta=state.schools[id]||{};
       if(!groups.has(id)) groups.set(id,{id,schoolName:meta.name||id,area:meta.area||"",shifts:[],importedShifts:[]});
@@ -1673,7 +1757,9 @@ async function ensureTodayPending() {
     let previousRecords = {};
     const needsPrevious = Object.keys(state.schools).some(id => {
       const current = currentRecords[id];
-      const stored = Array.isArray(state.schools[id]?.shifts) ? state.schools[id].shifts : [];
+      const meta = state.schools[id] || {};
+      if (Array.isArray(meta.expectedShifts)) return false;
+      const stored = Array.isArray(meta.shifts) ? meta.shifts : [];
       return !recordShifts(current).length && !stored.length;
     });
     if (needsPrevious) previousRecords = await getMonthRecordsFresh(previousMonthKey(month));
@@ -1688,9 +1774,14 @@ async function ensureTodayPending() {
       const current = clone(currentRecords[schoolId] || { s:{}, r:{}, n:{} });
       if (current?.n?.[String(day)]) return;
 
-      let shifts = recordShifts(current);
-      if (!shifts.length && Array.isArray(meta?.shifts)) shifts = meta.shifts.filter(shift => SHIFT_ORDER.includes(shift));
-      if (!shifts.length) shifts = recordShifts(previousRecords[schoolId]);
+      let shifts;
+      if (Array.isArray(meta?.expectedShifts)) {
+        shifts = normalizeShiftList(meta.expectedShifts);
+      } else {
+        shifts = recordShifts(current);
+        if (!shifts.length && Array.isArray(meta?.shifts)) shifts = meta.shifts.filter(shift => SHIFT_ORDER.includes(shift));
+        if (!shifts.length) shifts = recordShifts(previousRecords[schoolId]);
+      }
       if (!shifts.length) return;
 
       // Sem um calendário mensal já criado, não presumimos sábado/domingo.
@@ -1943,6 +2034,123 @@ async function toggleUser(uid,currentlyActive) {
   catch(error){console.error(error);showToast("Não foi possível atualizar o acesso.");}
 }
 
+
+function renderSchoolHistorySelector() {
+  const select = $("#schoolHistorySelect");
+  if (!select) return;
+  const schools = Object.values(state.schools || {})
+    .filter(meta => meta?.active !== false)
+    .sort((a,b) => (a.name || a.id).localeCompare(b.name || b.id, "pt-BR"));
+
+  if (!schools.length) {
+    select.innerHTML = '<option value="">Nenhuma escola carregada</option>';
+    select.disabled = true;
+    syncCustomSelect(select);
+    return;
+  }
+
+  select.disabled = false;
+  if (!state.schoolHistoryId || !state.schools[state.schoolHistoryId]) state.schoolHistoryId = schools[0].id;
+  select.innerHTML = schools.map(meta => `<option value="${escapeHtml(meta.id)}" ${meta.id === state.schoolHistoryId ? "selected" : ""}>${escapeHtml(meta.name || meta.id)}</option>`).join("");
+  enhanceSelect(select);
+  select.value = state.schoolHistoryId;
+  syncCustomSelect(select);
+  if ($("#schoolHistoryProfile")) $("#schoolHistoryProfile").disabled = !state.schoolHistoryId;
+}
+
+function historyStatusCounts(schoolId, record) {
+  const counts = { G:0, R:0, J:0 };
+  for (const shift of effectiveShiftsForSchool(schoolId, record)) {
+    for (const ch of record?.s?.[shift] || "") if (ch in counts) counts[ch] += 1;
+  }
+  return counts;
+}
+
+function renderReadOnlyCalendarHalf(schoolId, record, shifts, month, startDay, endDay) {
+  const cols = endDay - startDay + 1;
+  const headers = [];
+  const days = [];
+  for (let day = startDay; day <= endDay; day++) {
+    headers.push(`<div class="calendar-day-head"><span>${weekdayShort(month, day)}</span><strong>${String(day).padStart(2,"0")}</strong></div>`);
+    const chips = shifts.map(shift => {
+      const ch = statusChar(record, shift, day);
+      const info = STATUS_INFO[ch] || STATUS_INFO["?"];
+      const reason = record?.r?.[String(day)]?.[shift] || (ch === "X" ? record?.n?.[String(day)] : "") || "";
+      const title = `${String(day).padStart(2,"0")}/${month.slice(5,7)}/${month.slice(0,4)} · ${SHIFT_LABELS[shift]} · ${info.label}${reason ? ` · ${reason}` : ""}`;
+      return `<span class="status-chip readonly-status-chip ${info.cls}${reason ? " has-reason" : ""}" title="${escapeHtml(title)}">${shiftCode(shift)}</span>`;
+    }).join("");
+    days.push(`<div class="calendar-day">${chips}</div>`);
+  }
+  return `<div class="calendar-half history-calendar-half"><div class="calendar-body"><div class="calendar-header" style="--cols:${cols}">${headers.join("")}</div><div class="calendar-grid" style="--cols:${cols}">${days.join("")}</div></div></div>`;
+}
+
+function renderSchoolHistory() {
+  const header = $("#schoolHistoryHeader");
+  const container = $("#schoolHistoryMonths");
+  if (!header || !container) return;
+  const schoolId = state.schoolHistoryId;
+  const meta = state.schools[schoolId];
+  if (!schoolId || !meta) {
+    header.innerHTML = '<article class="card history-empty-card"><strong>Selecione uma escola</strong><span>Os calendários mensais aparecerão aqui.</span></article>';
+    container.innerHTML = "";
+    return;
+  }
+
+  const expected = effectiveShiftsForSchool(schoolId, Object.values(state.schoolHistoryRecords)[0] || null);
+  const expectedText = expected.length ? expected.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Nenhum turno definido";
+  const entries = Object.entries(state.schoolHistoryRecords).sort((a,b) => b[0].localeCompare(a[0]));
+  const totals = entries.reduce((acc,[,record]) => {
+    const c = historyStatusCounts(schoolId, record);
+    acc.G += c.G; acc.R += c.R; acc.J += c.J;
+    return acc;
+  }, {G:0,R:0,J:0});
+
+  header.innerHTML = `<article class="card history-school-summary"><div class="history-school-main"><p class="eyebrow">Escola selecionada</p><h3>${escapeHtml(meta.name || schoolId)}</h3><div class="school-meta">${meta.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}<span class="meta-pill expected-shifts-pill">Esperados: ${escapeHtml(expectedText)}</span></div></div><div class="history-school-stats"><div><strong>${entries.length}</strong><small>meses</small></div><div><strong>${totals.G}</strong><small>freq.</small></div><div><strong>${totals.R}</strong><small>pend.</small></div><div><strong>${totals.J}</strong><small>just.</small></div></div></article>`;
+
+  if (!entries.length) {
+    container.innerHTML = '<article class="card history-empty-card"><strong>Sem histórico</strong><span>Não há meses gravados para esta escola.</span></article>';
+    return;
+  }
+
+  container.innerHTML = entries.map(([month, record]) => {
+    const shifts = effectiveShiftsForSchool(schoolId, record);
+    const counts = historyStatusCounts(schoolId, record);
+    const ndays = daysInMonth(month);
+    const monthMeta = state.months[month] || {};
+    return `<article class="card school-history-month-card"><header class="history-month-head"><div><p class="eyebrow">${escapeHtml(monthMeta.lastSource === "monitora" ? "Monitora" : "Histórico")}</p><h3>${monthLabel(month)}</h3><span>${shifts.length ? shifts.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Sem turnos esperados"}</span></div><div class="history-month-counts"><span><b>${counts.G}</b> frequência</span><span><b>${counts.R}</b> pendente</span><span><b>${counts.J}</b> justificada</span></div></header><div class="school-calendar history-school-calendar">${shifts.length ? renderReadOnlyCalendarHalf(schoolId, record, shifts, month, 1, Math.min(15,ndays)) + (ndays > 15 ? renderReadOnlyCalendarHalf(schoolId, record, shifts, month, 16, ndays) : "") : '<div class="empty-card">Sem turnos esperados.</div>'}</div></article>`;
+  }).join("");
+}
+
+async function loadSchoolHistory(schoolId = state.schoolHistoryId) {
+  if (!schoolId || !db || !state.profile) return;
+  state.schoolHistoryId = schoolId;
+  renderSchoolHistorySelector();
+  const requestId = ++state.schoolHistoryRequest;
+  const container = $("#schoolHistoryMonths");
+  if (container) container.innerHTML = '<article class="card history-loading-card"><span class="history-loader"></span><strong>Carregando histórico...</strong></article>';
+  const months = availableMonths().sort();
+  try {
+    const pairs = await Promise.all(months.map(async month => {
+      const snap = await getDoc(doc(db,"months",month,"schools",schoolId));
+      return snap.exists() ? [month, snap.data()] : null;
+    }));
+    if (requestId !== state.schoolHistoryRequest) return;
+    state.schoolHistoryRecords = Object.fromEntries(pairs.filter(Boolean));
+    renderSchoolHistory();
+  } catch (error) {
+    console.error("Falha ao carregar histórico da escola:", error);
+    if (requestId !== state.schoolHistoryRequest) return;
+    if (container) container.innerHTML = '<article class="card history-empty-card"><strong>Não foi possível carregar</strong><span>Confira sua conexão e tente novamente.</span></article>';
+  }
+}
+
+function openSchoolHistory(schoolId) {
+  if (!schoolId) return;
+  state.schoolHistoryId = schoolId;
+  state.schoolHistoryRecords = {};
+  switchView("school");
+}
+
 function switchView(view) {
   if ((view === "import" || view === "users") && !isAdmin()) return;
 
@@ -1955,6 +2163,7 @@ function switchView(view) {
     setMonitorPerformanceMode(view === "monitor");
     if (view === "users") loadUserManagement();
     if (view === "assistant") refreshAssistantStatus();
+    if (view === "school") { renderSchoolHistorySelector(); if (state.schoolHistoryId) loadSchoolHistory(state.schoolHistoryId); }
     $("#sidebar").classList.remove("open");
     return;
   }
@@ -1962,7 +2171,7 @@ function switchView(view) {
   $$(".nav-button").forEach(btn => btn.classList.toggle("active", btn.dataset.view === view));
   $$(".view").forEach(panel => panel.classList.toggle("active", panel === next));
 
-  const labels = { monitor:"Acompanhamento", daily:"CSV diário", assistant:"Assistente", import:"Monitora", users:"Usuários" };
+  const labels = { monitor:"Acompanhamento", school:"Escola", daily:"CSV diário", assistant:"Assistente", import:"Monitora", users:"Usuários" };
   setMonitorPerformanceMode(view === "monitor");
   $("#workspaceTitle").textContent = labels[view] || "MFS";
   $("#sidebar").classList.remove("open");
@@ -1974,6 +2183,7 @@ function switchView(view) {
 
   if (view === "users") loadUserManagement();
   if (view === "assistant") refreshAssistantStatus();
+  if (view === "school") { renderSchoolHistorySelector(); if (state.schoolHistoryId) loadSchoolHistory(state.schoolHistoryId); }
 }
 
 function bindEvents() {
@@ -1987,6 +2197,9 @@ function bindEvents() {
   $$(".nav-button").forEach(button=>button.addEventListener("click",()=>switchView(button.dataset.view)));
   $$('[data-go-view]').forEach(button=>button.addEventListener('click',()=>switchView(button.dataset.goView)));
   $("#monthSelect")?.addEventListener("change",event=>{state.month=event.target.value;subscribeMonthRecords(state.month);});
+  $("#schoolHistorySelect")?.addEventListener("change",event=>{ state.schoolHistoryId=event.target.value; state.schoolHistoryRecords={}; loadSchoolHistory(state.schoolHistoryId); });
+  $("#refreshSchoolHistory")?.addEventListener("click",()=>loadSchoolHistory(state.schoolHistoryId));
+  $("#schoolHistoryProfile")?.addEventListener("click",()=>{ if(state.schoolHistoryId) openSchoolProfile(state.schoolHistoryId); });
   $("#schoolSearch")?.addEventListener("input",event=>{
     state.search=event.target.value;
     clearTimeout(monitorSearchTimer);
@@ -1995,6 +2208,8 @@ function bindEvents() {
   $("#shiftFilter")?.addEventListener("change",event=>{state.shift=event.target.value;renderMonitor();});
   $("#statusFilter")?.addEventListener("change",event=>{state.status=event.target.value;renderMonitor();});
   $("#schoolList")?.addEventListener("click",event=>{
+    const historyButton=event.target.closest("[data-school-history]");
+    if(historyButton){openSchoolHistory(historyButton.dataset.schoolHistory);return;}
     const profileButton=event.target.closest("[data-school-profile]");
     if(profileButton){openSchoolProfile(profileButton.dataset.schoolProfile);return;}
     const button=event.target.closest("[data-edit-status]");

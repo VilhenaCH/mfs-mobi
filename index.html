@@ -10,7 +10,7 @@
   <link rel="icon" type="image/svg+xml" href="favicon.svg?v=0.7.1" />
   <link rel="icon" type="image/png" sizes="64x64" href="favicon-64.png?v=0.7.1" />
   <link rel="apple-touch-icon" href="apple-touch-icon.png?v=0.7.1" />
-  <link rel="stylesheet" href="style.css?v=0.7.3" />
+  <link rel="stylesheet" href="style.css?v=0.8.0" />
 </head>
 <body>
   <div class="motion-scene" aria-hidden="true">
@@ -91,6 +91,10 @@
           <span class="nav-icon">◫</span>
           <span><b>Acompanhamento</b><small>Visão mensal</small></span>
         </button>
+        <button class="nav-button" data-view="school" type="button">
+          <span class="nav-icon">◎</span>
+          <span><b>Escola</b><small>Histórico individual</small></span>
+        </button>
         <button class="nav-button" data-view="daily" type="button">
           <span class="nav-icon">↥</span>
           <span><b>CSV diário</b><small>Atualizar e cobrar</small></span>
@@ -111,7 +115,7 @@
 
       <div class="sidebar-bottom">
         <div class="storage-chip"><span class="pulse-dot"></span><div><strong>Cloud Firestore</strong><small>Sincronização protegida</small></div></div>
-        <div class="version">MFS v0.7.3 · Assistente Supremo</div>
+        <div class="version">MFS v0.8.0 · Assistente Supremo</div>
       </div>
     </aside>
 
@@ -177,6 +181,37 @@
               <button class="bulk-clear" id="bulkClearButton" type="button" aria-label="Limpar seleção">×</button>
             </div>
           </div>
+        </section>
+
+
+
+        <section class="view" id="view-school" data-view-panel="school">
+          <div class="hero-row">
+            <div>
+              <p class="eyebrow">Visão individual</p>
+              <h2>Histórico da escola</h2>
+              <p class="muted">Consulte uma unidade isoladamente e acompanhe todos os meses disponíveis no Firestore.</p>
+            </div>
+            <div class="source-badge">Escola · histórico completo</div>
+          </div>
+
+          <div class="card school-history-toolbar">
+            <div class="field grow">
+              <label for="schoolHistorySelect">Escola</label>
+              <select id="schoolHistorySelect"></select>
+            </div>
+            <button class="button ghost" id="schoolHistoryProfile" type="button" disabled>Perfil da escola</button>
+            <button class="button ghost" id="refreshSchoolHistory" type="button">Atualizar histórico</button>
+          </div>
+
+          <div id="schoolHistoryHeader" class="school-history-header">
+            <article class="card history-empty-card">
+              <strong>Selecione uma escola</strong>
+              <span>Os calendários mensais aparecerão aqui.</span>
+            </article>
+          </div>
+
+          <div id="schoolHistoryMonths" class="school-history-months"></div>
         </section>
 
         <section class="view" id="view-daily" data-view-panel="daily">
@@ -326,7 +361,7 @@
   </div>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="firebase-config.js?v=0.7.3"></script>
-  <script type="module" src="app.js?v=0.7.3"></script>
+  <script src="firebase-config.js?v=0.8.0"></script>
+  <script type="module" src="app.js?v=0.8.0"></script>
 </body>
 </html>

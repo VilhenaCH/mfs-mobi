@@ -64,7 +64,18 @@ service cloud.firestore {
 
     match /schools/{schoolId} {
       allow read: if activeUser();
-      allow create, update, delete: if admin();
+      allow create, delete: if admin();
+      allow update: if admin() || (
+        activeUser()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'expectedShifts',
+          'expectedShiftsUpdatedAt',
+          'expectedShiftsUpdatedBy'
+        ])
+        && request.resource.data.expectedShifts is list
+        && request.resource.data.expectedShifts.size() <= 4
+        && request.resource.data.expectedShiftsUpdatedBy == request.auth.uid
+      );
     }
 
     match /months/{monthId} {
