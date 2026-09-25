@@ -188,3 +188,127 @@ input[type="date"]::-webkit-calendar-picker-indicator,input[type="time"]::-webki
 @media(prefers-reduced-motion:reduce){.motion-scene{display:none}.nav-button.active .nav-icon,.assistant-orb,.today-dot,.calendar-day.today-column .status-chip.pending{animation:none!important}}
 .status-modal,.school-profile-modal{overflow:visible}
 .modal-accent{border-radius:18px 18px 0 0}
+
+
+/* =========================================================
+   MFS v0.7.1 — Smooth UI / stacking / navigation hotfix
+   ========================================================= */
+
+/* Desktop/tablet sidebar stays attached to the viewport for the full scroll. */
+.app-shell{display:block;min-height:100vh}
+.sidebar{
+  position:fixed!important;
+  inset:0 auto 0 0;
+  width:260px;
+  height:100dvh;
+  min-height:100vh;
+  overflow-y:auto;
+  overscroll-behavior:contain;
+  scrollbar-width:thin;
+  z-index:70!important;
+  backdrop-filter:blur(8px);
+  -webkit-backdrop-filter:blur(8px);
+}
+.workspace{
+  position:relative!important;
+  z-index:2;
+  margin-left:260px;
+  min-height:100vh;
+  min-width:0;
+}
+
+/* The custom select menu is portaled to body, so cards/modals can never cover it. */
+.mfs-select{z-index:auto}
+.mfs-select-menu.mfs-select-portal{
+  position:fixed;
+  z-index:10000;
+  left:auto;
+  right:auto;
+  top:auto;
+  bottom:auto;
+  max-height:300px;
+  overflow:auto;
+  overscroll-behavior:contain;
+  opacity:0;
+  visibility:hidden;
+  pointer-events:none;
+  transform:translateY(-4px) scale(.995);
+  transition:opacity .12s ease,transform .12s ease,visibility .12s linear;
+  box-shadow:0 14px 38px rgba(0,0,0,.44),0 0 0 1px rgba(185,44,255,.045);
+  backdrop-filter:none;
+  -webkit-backdrop-filter:none;
+}
+.mfs-select-menu.mfs-select-portal.portal-open{
+  opacity:1;
+  visibility:visible;
+  pointer-events:auto;
+  transform:none;
+}
+.mfs-select-menu.mfs-select-portal.portal-above{
+  transform-origin:bottom;
+}
+.mfs-select-option{transition:background-color .1s ease,color .1s ease}
+
+/* Lighter rendering: keep the premium look without expensive full-page blur. */
+.card{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+.workspace-topbar{backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)}
+.motion-scene{opacity:.42}
+.motion-beam{display:none}
+.motion-orb{filter:none;opacity:.085;will-change:transform}
+.orb-a{background:radial-gradient(circle,rgba(155,40,255,.42) 0%,rgba(155,40,255,.12) 38%,transparent 72%);animation-duration:34s}
+.orb-b{background:radial-gradient(circle,rgba(56,71,255,.36) 0%,rgba(56,71,255,.10) 40%,transparent 72%);animation-duration:40s}
+.orb-c{display:none}
+.motion-grid{animation-duration:48s;opacity:.7}
+.card::before{opacity:.5;transition:background-position .35s ease}
+
+/* Navigation transitions: no viewport snapshot and no animated blur. */
+::view-transition-old(root),::view-transition-new(root){animation:none!important}
+.view.active{animation:none!important}
+.view-leaving{animation:none!important}
+.view.soft-view-enter{animation:mfsSoftViewEnter .16s ease-out both!important}
+@keyframes mfsSoftViewEnter{from{opacity:.55;transform:translateY(4px)}to{opacity:1;transform:none}}
+
+/* Avoid dozens of simultaneous infinite animations on calendars. */
+.nav-button.active .nav-icon{animation:none!important;box-shadow:0 0 14px rgba(185,44,255,.10)}
+.assistant-orb{animation:none!important}
+.today-dot{animation:none!important;opacity:.9}
+.calendar-day.today-column .status-chip.pending{animation:none!important;box-shadow:0 0 14px rgba(255,61,101,.18)}
+
+/* Ripple stays only on primary interaction controls and is shorter. */
+.mfs-ripple{animation-duration:.34s}
+
+@media(max-width:1050px){
+  .sidebar{width:82px}
+  .workspace{margin-left:82px}
+}
+
+@media(max-width:720px){
+  .workspace{margin-left:0}
+  .sidebar{
+    width:250px;
+    height:100dvh;
+    transform:translateX(-105%);
+    transition:transform .16s ease-out;
+    backdrop-filter:blur(10px);
+    -webkit-backdrop-filter:blur(10px);
+  }
+  .sidebar.open{transform:translateX(0)}
+  .mfs-select-menu.mfs-select-portal{
+    left:12px!important;
+    right:12px!important;
+    top:auto!important;
+    bottom:12px!important;
+    width:auto!important;
+    max-height:min(52vh,360px)!important;
+    border-radius:15px;
+    transform:translateY(8px) scale(.995);
+  }
+  .mfs-select-menu.mfs-select-portal.portal-open{transform:none}
+  .motion-scene{opacity:.28}
+  .motion-grid{display:none}
+}
+
+@media(prefers-reduced-motion:reduce){
+  .view.soft-view-enter{animation:none!important}
+  .motion-orb{animation:none!important}
+}

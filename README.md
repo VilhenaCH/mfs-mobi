@@ -1,4 +1,4 @@
-# MFS v0.7.0 — Monitoramento de Frequência Supremo
+# MFS v0.7.1 — Monitoramento de Frequência Supremo
 
 **Mobieduca.me**
 
@@ -100,7 +100,7 @@ Depois da publicação, faça `Ctrl + F5` uma vez.
 
 ## Firestore Rules
 
-A v0.7.0 não cria novas coleções em relação à v0.7.0. As regras incluídas no pacote permanecem compatíveis com as novas funções.
+A v0.7.1 não cria novas coleções em relação à v0.7.1. As regras incluídas no pacote permanecem compatíveis com as novas funções.
 
 ## Segurança
 
@@ -111,3 +111,13 @@ Dados escolares e credenciais não ficam embutidos no repositório. A aplicaçã
 - Cloud Firestore;
 - Firestore Security Rules;
 - cofre criptografado para acessos sensíveis.
+
+
+## Hotfix v0.7.1
+
+- Menus customizados agora são renderizados em um portal global, acima de cards, filtros e modais.
+- O menu detecta automaticamente se deve abrir para cima ou para baixo.
+- A sidebar fica fixa no viewport e acompanha toda a rolagem.
+- Transições entre áreas foram simplificadas para opacity + translate, sem blur nem View Transition snapshot.
+- Removidas animações infinitas em dezenas de pendências do calendário.
+- Fundo animado e efeitos de vidro foram reduzidos para melhorar fluidez e consumo de GPU.

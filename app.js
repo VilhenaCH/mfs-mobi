@@ -147,10 +147,107 @@ function showToast(message) {
 }
 
 
+let activeSelectPortal = null;
+let selectPortalFrame = 0;
+
+function restoreSelectMenu(wrapper) {
+  if (!wrapper) return;
+  const menu = wrapper._mfsMenu;
+  const trigger = wrapper._mfsTrigger;
+  if (!menu) return;
+
+  menu.classList.remove("portal-open", "portal-above");
+  menu.removeAttribute("style");
+  if (menu.parentNode !== wrapper) wrapper.appendChild(menu);
+  trigger?.setAttribute("aria-expanded", "false");
+  wrapper.classList.remove("open");
+
+  if (activeSelectPortal === wrapper) activeSelectPortal = null;
+}
+
 function closeCustomSelects(except = null) {
   $$(".mfs-select.open").forEach(wrapper => {
-    if (wrapper !== except) wrapper.classList.remove("open");
+    if (wrapper !== except) restoreSelectMenu(wrapper);
   });
+}
+
+function positionSelectPortal(wrapper) {
+  if (!wrapper || !wrapper.classList.contains("open")) return;
+
+  const trigger = wrapper._mfsTrigger;
+  const menu = wrapper._mfsMenu;
+  if (!trigger || !menu) return;
+
+  const rect = trigger.getBoundingClientRect();
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  if (rect.bottom < -8 || rect.top > vh + 8) {
+    restoreSelectMenu(wrapper);
+    return;
+  }
+
+  if (vw <= 720) {
+    menu.style.position = "fixed";
+    menu.style.left = "12px";
+    menu.style.right = "12px";
+    menu.style.top = "auto";
+    menu.style.bottom = "12px";
+    menu.style.width = "auto";
+    menu.style.maxHeight = "min(52vh, 360px)";
+    menu.classList.remove("portal-above");
+    return;
+  }
+
+  const margin = 10;
+  const gap = 6;
+  const width = Math.min(Math.max(rect.width, 150), vw - margin * 2);
+  let left = rect.left;
+  if (left + width > vw - margin) left = vw - margin - width;
+  left = Math.max(margin, left);
+
+  const spaceBelow = vh - rect.bottom - gap - margin;
+  const spaceAbove = rect.top - gap - margin;
+  const openAbove = spaceBelow < 180 && spaceAbove > spaceBelow;
+  const available = Math.max(110, openAbove ? spaceAbove : spaceBelow);
+
+  menu.style.position = "fixed";
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.right = "auto";
+  menu.style.width = `${Math.round(width)}px`;
+  menu.style.maxHeight = `${Math.min(300, Math.floor(available))}px`;
+
+  if (openAbove) {
+    menu.style.top = "auto";
+    menu.style.bottom = `${Math.round(vh - rect.top + gap)}px`;
+    menu.classList.add("portal-above");
+  } else {
+    menu.style.top = `${Math.round(rect.bottom + gap)}px`;
+    menu.style.bottom = "auto";
+    menu.classList.remove("portal-above");
+  }
+}
+
+function scheduleSelectPortalPosition() {
+  if (!activeSelectPortal) return;
+  cancelAnimationFrame(selectPortalFrame);
+  selectPortalFrame = requestAnimationFrame(() => positionSelectPortal(activeSelectPortal));
+}
+
+function openSelectPortal(wrapper) {
+  if (!wrapper || wrapper.classList.contains("disabled")) return;
+  closeCustomSelects(wrapper);
+
+  const menu = wrapper._mfsMenu;
+  const trigger = wrapper._mfsTrigger;
+  if (!menu || !trigger) return;
+
+  wrapper.classList.add("open");
+  trigger.setAttribute("aria-expanded", "true");
+  document.body.appendChild(menu);
+  menu.classList.add("portal-open");
+  activeSelectPortal = wrapper;
+  positionSelectPortal(wrapper);
 }
 
 function enhanceSelect(select) {
@@ -172,13 +269,16 @@ function enhanceSelect(select) {
   trigger.type = "button";
   trigger.className = "mfs-select-trigger";
   trigger.setAttribute("aria-haspopup", "listbox");
+  trigger.setAttribute("aria-expanded", "false");
   trigger.innerHTML = '<span class="mfs-select-value"></span><span class="mfs-select-chevron">⌄</span>';
 
   const menu = document.createElement("div");
-  menu.className = "mfs-select-menu";
+  menu.className = "mfs-select-menu mfs-select-portal";
   menu.setAttribute("role", "listbox");
 
   wrapper.append(trigger, menu);
+  wrapper._mfsMenu = menu;
+  wrapper._mfsTrigger = trigger;
 
   const refresh = () => {
     const selected = select.options[select.selectedIndex] || select.options[0];
@@ -198,18 +298,18 @@ function enhanceSelect(select) {
   trigger.addEventListener("click", event => {
     event.stopPropagation();
     if (select.disabled) return;
-    const opening = !wrapper.classList.contains("open");
-    closeCustomSelects(wrapper);
-    wrapper.classList.toggle("open", opening);
+    if (wrapper.classList.contains("open")) restoreSelectMenu(wrapper);
+    else openSelectPortal(wrapper);
   });
 
   menu.addEventListener("click", event => {
+    event.stopPropagation();
     const optionButton = event.target.closest(".mfs-select-option");
     if (!optionButton || optionButton.disabled) return;
     select.value = optionButton.dataset.value;
     select.dispatchEvent(new Event("change", { bubbles: true }));
     refresh();
-    wrapper.classList.remove("open");
+    restoreSelectMenu(wrapper);
   });
 
   select.addEventListener("change", refresh);
@@ -225,10 +325,18 @@ function syncCustomSelect(select) {
 
 function initCustomSelectSystem() {
   enhanceAllSelects();
-  document.addEventListener("click", () => closeCustomSelects());
+
+  document.addEventListener("click", event => {
+    if (event.target.closest(".mfs-select-menu")) return;
+    closeCustomSelects();
+  });
+
   document.addEventListener("keydown", event => {
     if (event.key === "Escape") closeCustomSelects();
   });
+
+  window.addEventListener("resize", scheduleSelectPortalPosition, { passive: true });
+  window.addEventListener("scroll", scheduleSelectPortalPosition, { passive: true, capture: true });
 
   const observer = new MutationObserver(() => requestAnimationFrame(() => enhanceAllSelects()));
   observer.observe(document.body, { childList: true, subtree: true });
@@ -236,7 +344,7 @@ function initCustomSelectSystem() {
 
 function initMotionInteractions() {
   document.addEventListener("pointerdown", event => {
-    const target = event.target.closest(".button,.mini-button,.quick-action,.nav-button,.view-switch-button,.assistant-top-button,.google-login-button,.status-chip");
+    const target = event.target.closest(".button,.mini-button,.quick-action,.view-switch-button,.assistant-top-button,.google-login-button");
     if (!target || target.disabled) return;
     const rect = target.getBoundingClientRect();
     const ripple = document.createElement("span");
@@ -1718,29 +1826,34 @@ async function toggleUser(uid,currentlyActive) {
 }
 
 function switchView(view) {
-  if ((view==="import"||view==="users")&&!isAdmin()) return;
-  const update = () => {
-    $$(".nav-button").forEach(btn=>btn.classList.toggle("active",btn.dataset.view===view));
-    $$(".view").forEach(panel=>panel.classList.toggle("active",panel.dataset.viewPanel===view));
-    const labels={monitor:"Acompanhamento",daily:"CSV diário",assistant:"Assistente",import:"Monitora",users:"Usuários"};
-    $("#workspaceTitle").textContent=labels[view]||"MFS";
-    $("#sidebar").classList.remove("open");
-  };
+  if ((view === "import" || view === "users") && !isAdmin()) return;
 
-  if (document.startViewTransition) {
-    document.startViewTransition(update);
-  } else {
-    const current = $(".view.active");
-    current?.classList.add("view-leaving");
-    setTimeout(() => {
-      update();
-      current?.classList.remove("view-leaving");
-    }, 120);
+  closeCustomSelects();
+
+  const current = $(".view.active");
+  const next = $(`.view[data-view-panel="${view}"]`);
+
+  if (current === next) {
+    if (view === "users") loadUserManagement();
+    if (view === "assistant") refreshAssistantStatus();
+    $("#sidebar").classList.remove("open");
+    return;
   }
 
-  if(view==="users")loadUserManagement();
-  if(view==="assistant")refreshAssistantStatus();
-  closeCustomSelects();
+  $$(".nav-button").forEach(btn => btn.classList.toggle("active", btn.dataset.view === view));
+  $$(".view").forEach(panel => panel.classList.toggle("active", panel === next));
+
+  const labels = { monitor:"Acompanhamento", daily:"CSV diário", assistant:"Assistente", import:"Monitora", users:"Usuários" };
+  $("#workspaceTitle").textContent = labels[view] || "MFS";
+  $("#sidebar").classList.remove("open");
+
+  if (next) {
+    next.classList.remove("soft-view-enter");
+    requestAnimationFrame(() => next.classList.add("soft-view-enter"));
+  }
+
+  if (view === "users") loadUserManagement();
+  if (view === "assistant") refreshAssistantStatus();
 }
 
 function bindEvents() {
