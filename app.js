@@ -99,6 +99,10 @@ let app = null;
 let auth = null;
 let db = null;
 let toastTimer = null;
+let calendarObserver = null;
+let monitorRenderTimer = null;
+let monitorSearchTimer = null;
+const VIRTUAL_CALENDAR_MARGIN = "600px 0px 800px 0px";
 
 const $ = (sel, root = document) => root.querySelector(sel);
 const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -505,6 +509,7 @@ function cleanupSubscriptions() {
 
 function enterAuthorizedApp() {
   showApp();
+  setMonitorPerformanceMode(true);
   const user = state.user;
   $("#userName").textContent = state.profile.displayName || user.displayName || user.email || "Usuário";
   $("#userRole").textContent = state.profile.role === "admin" ? "Administrador" : "Técnico";
@@ -533,7 +538,7 @@ function subscribeSchools() {
     const schools = {};
     snapshot.forEach(snap => { schools[snap.id] = { id: snap.id, ...snap.data() }; });
     state.schools = schools;
-    renderMonitor();
+    scheduleMonitorRender();
     scheduleTodayPendingSync(500);
   }, error => {
     console.error(error);
@@ -547,7 +552,7 @@ function subscribeMonths() {
     snapshot.forEach(snap => { months[snap.id] = { id: snap.id, ...snap.data() }; });
     state.months = months;
     renderMonthSelect();
-    renderMonitor();
+    scheduleMonitorRender();
   }, error => console.error("Falha ao carregar meses:", error));
 }
 
@@ -559,7 +564,7 @@ function subscribeMonthRecords(month) {
     const records = {};
     snapshot.forEach(snap => records[snap.id] = snap.data());
     state.records = records;
-    renderMonitor();
+    scheduleMonitorRender();
     scheduleTodayPendingSync(500);
     if ($("#dailyDate")?.value?.startsWith(month)) renderCharges($("#dailyDate").value);
   }, error => {
@@ -646,6 +651,99 @@ function schoolMatches(meta, record) {
   return true;
 }
 
+function scheduleMonitorRender(delay = 90) {
+  clearTimeout(monitorRenderTimer);
+  monitorRenderTimer = setTimeout(() => {
+    requestAnimationFrame(() => renderMonitor());
+  }, delay);
+}
+
+function virtualCalendarPlaceholder() {
+  return `<div class="calendar-virtual-placeholder" aria-hidden="true">
+    <div class="virtual-placeholder-bar"></div>
+    <div class="virtual-placeholder-grid"></div>
+    <span>Calendário otimizado</span>
+  </div>`;
+}
+
+function restoreBulkSelectionInCalendar(calendar) {
+  if (!calendar || !state.bulkSelection?.size) return;
+  calendar.querySelectorAll("[data-selection-key]").forEach(button => {
+    if (state.bulkSelection.has(button.dataset.selectionKey)) {
+      button.classList.add("bulk-selected");
+    }
+  });
+}
+
+function hydrateSchoolCalendar(card) {
+  if (!card?.isConnected || card.dataset.calendarHydrated === "1") return;
+  const schoolId = card.dataset.schoolId;
+  const calendar = card.querySelector(".virtual-calendar");
+  const record = state.records[schoolId];
+  if (!calendar || !record) return;
+
+  const shifts = state.shift === "TODOS"
+    ? recordShifts(record)
+    : [state.shift].filter(shift => record?.s?.[shift]);
+
+  const ndays = daysInMonth(state.month);
+  calendar.innerHTML = shifts.length
+    ? renderCalendarHalf(schoolId, record, shifts, state.month, 1, Math.min(15, ndays)) +
+      (ndays > 15 ? renderCalendarHalf(schoolId, record, shifts, state.month, 16, ndays) : "")
+    : `<div class="empty-card">Sem turnos registrados neste mês.</div>`;
+
+  card.dataset.calendarHydrated = "1";
+  calendar.classList.add("is-hydrated");
+  restoreBulkSelectionInCalendar(calendar);
+}
+
+function dehydrateSchoolCalendar(card) {
+  if (!card?.isConnected || card.dataset.calendarHydrated !== "1") return;
+  const calendar = card.querySelector(".virtual-calendar");
+  if (!calendar) return;
+  if (calendar.contains(document.activeElement)) return;
+
+  calendar.innerHTML = virtualCalendarPlaceholder();
+  calendar.classList.remove("is-hydrated");
+  card.dataset.calendarHydrated = "0";
+}
+
+function setupCalendarVirtualization() {
+  if (calendarObserver) {
+    calendarObserver.disconnect();
+    calendarObserver = null;
+  }
+
+  const cards = $$(".school-card[data-school-id]", $("#schoolList"));
+  if (!cards.length) return;
+
+  if (!("IntersectionObserver" in window)) {
+    cards.forEach(hydrateSchoolCalendar);
+    return;
+  }
+
+  calendarObserver = new IntersectionObserver(entries => {
+    for (const entry of entries) {
+      const card = entry.target;
+      if (entry.isIntersecting) {
+        hydrateSchoolCalendar(card);
+      } else {
+        dehydrateSchoolCalendar(card);
+      }
+    }
+  }, {
+    root: null,
+    rootMargin: VIRTUAL_CALENDAR_MARGIN,
+    threshold: 0
+  });
+
+  cards.forEach(card => calendarObserver.observe(card));
+}
+
+function setMonitorPerformanceMode(enabled) {
+  document.body.classList.toggle("monitor-performance-mode", Boolean(enabled));
+}
+
 function renderMonitor() {
   if (!$("#schoolList") || $("#appShell")?.hidden) return;
   renderMonthSelect();
@@ -673,10 +771,12 @@ function renderMonitor() {
   $("#resultMeta").innerHTML = `<span><strong>${filtered.length}</strong> escola${filtered.length === 1 ? "" : "s"}</span><span>${escapeHtml(shiftLabel)}</span><span>${escapeHtml(statusLabel)}</span>${latest ? `<span>dados até o dia <strong>${String(latest).padStart(2,"0")}</strong></span>` : ""}`;
 
   if (!filtered.length) {
+    if (calendarObserver) calendarObserver.disconnect();
     $("#schoolList").innerHTML = `<article class="card empty-card large-empty"><strong>${Object.keys(state.records).length ? "Nenhuma escola encontrada" : "Banco sem dados para este mês"}</strong><span>${Object.keys(state.records).length ? "Ajuste os filtros." : (isAdmin() ? "Importe o HTML do Monitora para popular o Firestore." : "Aguarde um administrador importar a base deste mês.")}</span></article>`;
     return;
   }
   $("#schoolList").innerHTML = filtered.map(([id, record]) => renderSchoolCard(id, state.schools[id] || {id,name:id}, record, state.month)).join("");
+  setupCalendarVirtualization();
 }
 
 function perSchoolCounts(record, shifts) {
@@ -717,11 +817,10 @@ function renderCalendarHalf(id, record, shifts, month, startDay, endDay) {
 function renderSchoolCard(id, meta, record, month) {
   const shifts = state.shift === "TODOS" ? recordShifts(record) : [state.shift].filter(s => record?.s?.[s]);
   const counts = perSchoolCounts(record, shifts);
-  const ndays = daysInMonth(month);
   const nonSchool = Object.entries(record?.n || {}).map(([day, reason]) => `${day}: ${reason}`).join(" · ");
-  return `<article class="card school-card">
+  return `<article class="card school-card" data-school-id="${escapeHtml(id)}" data-calendar-hydrated="0">
     <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}</div></div><div class="school-head-actions"><button class="school-profile-button" type="button" data-school-profile="${escapeHtml(id)}">Perfil</button><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></div></header>
-    <div class="school-calendar">${shifts.length ? renderCalendarHalf(id, record, shifts, month, 1, Math.min(15, ndays)) + (ndays > 15 ? renderCalendarHalf(id, record, shifts, month, 16, ndays) : "") : `<div class="empty-card">Sem turnos registrados neste mês.</div>`}</div>
+    <div class="school-calendar virtual-calendar">${virtualCalendarPlaceholder()}</div>
     <div class="school-footer"><span class="hint">Clique em M, T, N ou I para editar</span><span class="non-school-note" title="${escapeHtml(nonSchool)}">${nonSchool ? `Ocorrências: ${escapeHtml(nonSchool)}` : "Sem ocorrências cadastradas"}</span></div>
   </article>`;
 }
@@ -1834,6 +1933,7 @@ function switchView(view) {
   const next = $(`.view[data-view-panel="${view}"]`);
 
   if (current === next) {
+    setMonitorPerformanceMode(view === "monitor");
     if (view === "users") loadUserManagement();
     if (view === "assistant") refreshAssistantStatus();
     $("#sidebar").classList.remove("open");
@@ -1844,6 +1944,7 @@ function switchView(view) {
   $$(".view").forEach(panel => panel.classList.toggle("active", panel === next));
 
   const labels = { monitor:"Acompanhamento", daily:"CSV diário", assistant:"Assistente", import:"Monitora", users:"Usuários" };
+  setMonitorPerformanceMode(view === "monitor");
   $("#workspaceTitle").textContent = labels[view] || "MFS";
   $("#sidebar").classList.remove("open");
 
@@ -1867,7 +1968,11 @@ function bindEvents() {
   $$(".nav-button").forEach(button=>button.addEventListener("click",()=>switchView(button.dataset.view)));
   $$('[data-go-view]').forEach(button=>button.addEventListener('click',()=>switchView(button.dataset.goView)));
   $("#monthSelect")?.addEventListener("change",event=>{state.month=event.target.value;subscribeMonthRecords(state.month);});
-  $("#schoolSearch")?.addEventListener("input",event=>{state.search=event.target.value;renderMonitor();});
+  $("#schoolSearch")?.addEventListener("input",event=>{
+    state.search=event.target.value;
+    clearTimeout(monitorSearchTimer);
+    monitorSearchTimer=setTimeout(()=>renderMonitor(),110);
+  });
   $("#shiftFilter")?.addEventListener("change",event=>{state.shift=event.target.value;renderMonitor();});
   $("#statusFilter")?.addEventListener("change",event=>{state.status=event.target.value;renderMonitor();});
   $("#schoolList")?.addEventListener("click",event=>{

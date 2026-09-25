@@ -312,3 +312,112 @@ input[type="date"]::-webkit-calendar-picker-indicator,input[type="time"]::-webki
   .view.soft-view-enter{animation:none!important}
   .motion-orb{animation:none!important}
 }
+
+
+/* ============================================================
+   MFS v0.7.2 - Calendar performance / virtualized rendering
+   ============================================================ */
+
+/* The monthly monitor is the heaviest view. Disable decorative layers only
+   while it is visible; the rest of the app keeps the premium motion design. */
+body.monitor-performance-mode .motion-scene,
+body.monitor-performance-mode .ambient{
+  display:none!important;
+}
+body.monitor-performance-mode .workspace-topbar,
+body.monitor-performance-mode .sidebar{
+  backdrop-filter:none!important;
+  -webkit-backdrop-filter:none!important;
+}
+body.monitor-performance-mode .workspace-topbar{background:#0b0810!important}
+body.monitor-performance-mode .sidebar{background:#09070d!important}
+
+/* Browser can skip layout/paint for school cards far outside the viewport. */
+.school-card{
+  content-visibility:auto;
+  contain-intrinsic-size:340px;
+  animation:none!important;
+  transition:border-color .10s ease!important;
+}
+.school-card:hover{
+  transform:none!important;
+  box-shadow:none!important;
+}
+.school-card::before{display:none!important}
+
+/* Calendar contents are mounted only near the viewport. The placeholder keeps
+   the document height stable, avoiding jumps while scrolling. */
+.school-calendar.virtual-calendar{
+  min-height:232px;
+  contain:layout style paint;
+}
+.calendar-virtual-placeholder{
+  min-height:208px;
+  margin:0;
+  border:1px solid #241d2c;
+  border-radius:12px;
+  background:#0d0b11;
+  display:grid;
+  place-items:center;
+  position:relative;
+  overflow:hidden;
+  color:#5f5669;
+  font-size:8px;
+}
+.calendar-virtual-placeholder::before{
+  content:"";
+  position:absolute;
+  inset:0;
+  background:
+    linear-gradient(#201925 1px,transparent 1px) 0 34px/100% 42px,
+    linear-gradient(90deg,#201925 1px,transparent 1px) 0 0/calc(100% / 15) 100%;
+  opacity:.55;
+}
+.calendar-virtual-placeholder span{
+  position:relative;
+  z-index:1;
+  padding:5px 9px;
+  border:1px solid #2b2234;
+  border-radius:999px;
+  background:#100d15;
+}
+.virtual-placeholder-bar,.virtual-placeholder-grid{display:none}
+
+.calendar-half,
+.calendar-header,
+.calendar-grid{
+  contain:layout paint;
+}
+
+/* Thousands of per-chip shadows/transitions were a major paint cost. */
+.status-chip,
+.status-chip.sent,
+.status-chip.pending,
+.status-chip.justified,
+.status-chip.no-school,
+.status-chip.blank{
+  box-shadow:none!important;
+  transition:transform .07s ease,filter .07s ease!important;
+}
+.status-chip:hover{
+  transform:scale(1.04)!important;
+  filter:brightness(1.08)!important;
+}
+.calendar-day.today-column .status-chip.pending{box-shadow:none!important}
+
+/* Keep calendar painting local to the card. */
+.school-calendar,
+.calendar-half{
+  isolation:isolate;
+}
+
+/* Avoid expensive hover glow over the entire calendar card. */
+body.monitor-performance-mode .card::before{display:none!important}
+body.monitor-performance-mode .summary-card::after{filter:none!important;opacity:.09}
+body.monitor-performance-mode .live-pill .pulse-dot,
+body.monitor-performance-mode .storage-chip .pulse-dot{animation:none!important}
+
+@media(max-width:720px){
+  .school-calendar.virtual-calendar{min-height:224px}
+  .calendar-virtual-placeholder{min-height:200px}
+}
