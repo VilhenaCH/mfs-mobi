@@ -2410,16 +2410,48 @@ async function runMonitoraSyncTest(){
   result.textContent = "🟡 Tentando autenticar no Monitora...";
 
   try {
-    const response = await fetch("https://apiv3.mobieduca.me/login/run", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded"
-      },
-      body: new URLSearchParams({
+    const loginPayloads = [
+      {
         email: user,
         senha: password
-      })
-    });
+      },
+      {
+        usuario: user,
+        senha: password
+      },
+      {
+        login: user,
+        password: password
+      }
+    ];
+
+    let response = null;
+    let lastError = null;
+
+    for (const payload of loginPayloads) {
+      try {
+        const attempt = await fetch("https://apiv3.mobieduca.me/login/run", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded"
+          },
+          body: new URLSearchParams(payload)
+        });
+
+        if (attempt.ok) {
+          response = attempt;
+          break;
+        }
+
+        lastError = attempt.status;
+      } catch (err) {
+        lastError = err.message;
+      }
+    }
+
+    if (!response) {
+      throw new Error("Login recusado pela API. Último retorno: " + lastError);
+    }
 
     const text = await response.text();
 
