@@ -127,6 +127,7 @@
         </div>
         <div class="topbar-actions">
           <button class="quick-action ghost admin-only" type="button" data-go-view="import" hidden>↻ Monitora</button>
+          <button class="quick-action sync-button" id="syncMonitoraButton" type="button">🔄 Sync Monitora</button>
           <button class="quick-action primary" type="button" data-go-view="daily">＋ CSV diário</button>
           <button class="assistant-top-button" id="assistantTopButton" type="button" data-go-view="assistant" title="Abrir Assistente">
             <span class="assistant-orb">✦</span>
@@ -360,7 +361,22 @@
     </div>
   </div>
 
-  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  
+<div class="modal-backdrop" id="syncMonitoraModal" aria-hidden="true">
+  <div class="status-modal sync-modal">
+    <div class="modal-accent"></div>
+    <header class="modal-header"><div><p class="eyebrow">Integração manual</p><h3>Sync Monitora</h3></div><button class="modal-close" id="closeSyncModal" type="button">×</button></header>
+    <div class="modal-body">
+      <p class="muted">Teste de conexão com o Monitora usando seu acesso autorizado. A senha não será salva.</p>
+      <div class="field"><label>Usuário / Email</label><input id="syncUser" type="text"></div>
+      <div class="field"><label>Senha</label><input id="syncPassword" type="password"></div>
+      <div id="syncResult" class="sync-result">Aguardando conexão...</div>
+    </div>
+    <footer class="modal-footer"><button class="button ghost" id="cancelSync" type="button">Cancelar</button><button class="button primary" id="runSync" type="button">Conectar</button></footer>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="firebase-config.js?v=0.8.2"></script>
   <script type="module" src="app.js?v=0.8.2"></script>
 </body>

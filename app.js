@@ -2396,7 +2396,34 @@ function switchView(view) {
   if (view === "school") { renderSchoolHistorySelector(); if (state.schoolHistoryId) loadSchoolHistory(state.schoolHistoryId); }
 }
 
+
+async function runMonitoraSyncTest(){
+  const result=$("#syncResult");
+  const user=$("#syncUser")?.value?.trim();
+  const password=$("#syncPassword")?.value;
+  if(!user || !password){ result.textContent="Informe usuário e senha."; return; }
+  result.textContent="Testando conexão...";
+  /*
+    Primeira fase: somente validação.
+    A chamada real será ativada após confirmarmos CORS/sessão.
+  */
+  setTimeout(()=>{
+    result.innerHTML="🟡 Estrutura pronta. Próxima etapa: ligar a autenticação real da API Mobieduca.";
+  },800);
+}
+
+function openSyncModal(){
+  $("#syncMonitoraModal")?.classList.add("open");
+}
+function closeSyncModal(){
+  $("#syncMonitoraModal")?.classList.remove("open");
+}
+
 function bindEvents() {
+  $("#syncMonitoraButton")?.addEventListener("click",openSyncModal);
+  $("#closeSyncModal")?.addEventListener("click",closeSyncModal);
+  $("#cancelSync")?.addEventListener("click",closeSyncModal);
+  $("#runSync")?.addEventListener("click",runMonitoraSyncTest);
   $("#googleLoginButton")?.addEventListener("click",async()=>{
     try { const provider=new GoogleAuthProvider(); provider.setCustomParameters({prompt:"select_account"}); await signInWithPopup(auth,provider); }
     catch(error){console.error(error);showToast("Não foi possível entrar com Google.");}
