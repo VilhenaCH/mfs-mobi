@@ -2398,18 +2398,54 @@ function switchView(view) {
 
 
 async function runMonitoraSyncTest(){
-  const result=$("#syncResult");
-  const user=$("#syncUser")?.value?.trim();
-  const password=$("#syncPassword")?.value;
-  if(!user || !password){ result.textContent="Informe usuário e senha."; return; }
-  result.textContent="Testando conexão...";
-  /*
-    Primeira fase: somente validação.
-    A chamada real será ativada após confirmarmos CORS/sessão.
-  */
-  setTimeout(()=>{
-    result.innerHTML="🟡 Estrutura pronta. Próxima etapa: ligar a autenticação real da API Mobieduca.";
-  },800);
+  const result = $("#syncResult");
+  const user = $("#syncUser")?.value?.trim();
+  const password = $("#syncPassword")?.value;
+
+  if(!user || !password){
+    result.textContent = "Informe usuário e senha.";
+    return;
+  }
+
+  result.textContent = "🟡 Tentando autenticar no Monitora...";
+
+  try {
+    const response = await fetch("https://apiv3.mobieduca.me/login/run", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded"
+      },
+      body: new URLSearchParams({
+        email: user,
+        senha: password
+      })
+    });
+
+    const text = await response.text();
+
+    if(!response.ok){
+      throw new Error("HTTP " + response.status);
+    }
+
+    result.innerHTML = `
+      <strong>🟢 Resposta recebida do Monitora</strong><br>
+      Status HTTP: ${response.status}<br>
+      <small>Próxima etapa: validar sessão e consultar escolas.</small>
+    `;
+
+    console.log("Resposta login Monitora:", text);
+
+  } catch(error) {
+    console.error("Sync Monitora erro:", error);
+
+    result.innerHTML = `
+      🔴 Não foi possível conectar diretamente.<br>
+      Motivo: ${escapeHtml(error.message)}<br>
+      <small>
+      Se aparecer bloqueio CORS, precisaremos usar um conector local/navegador.
+      </small>
+    `;
+  }
 }
 
 function openSyncModal(){
