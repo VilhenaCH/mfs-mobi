@@ -1,0 +1,1 @@
+MFS v0.9.4 - sessão inicial antes do login e consulta somente leitura.

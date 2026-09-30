@@ -2407,76 +2407,107 @@ async function runMonitoraSyncTest(){
     return;
   }
 
-  result.textContent = "🟡 Tentando autenticar no Monitora...";
+  result.innerHTML = "🟡 Iniciando sessão no Monitora...";
 
   try {
-    const loginPayloads = [
+    /*
+      v0.9.4:
+      Primeiro criamos uma sessão de navegador.
+      Não salvamos cookies nem credenciais.
+    */
+    const sessionStart = await fetch(
+      "https://monitora.mobieduca.me/",
       {
-        email: user,
-        senha: password
-      },
-      {
-        usuario: user,
-        senha: password
-      },
-      {
-        login: user,
-        password: password
-      }
-    ];
-
-    let response = null;
-    let lastError = null;
-
-    for (const payload of loginPayloads) {
-      try {
-        const attempt = await fetch("https://apiv3.mobieduca.me/login/run", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/x-www-form-urlencoded"
-          },
-          body: new URLSearchParams(payload)
-        });
-
-        if (attempt.ok) {
-          response = attempt;
-          break;
+        method: "GET",
+        credentials: "include",
+        headers: {
+          "Accept": "text/html,application/xhtml+xml"
         }
-
-        lastError = attempt.status;
-      } catch (err) {
-        lastError = err.message;
       }
-    }
+    );
 
-    if (!response) {
-      throw new Error("Login recusado pela API. Último retorno: " + lastError);
-    }
+    result.innerHTML = "🟢 Sessão inicial criada<br>🟡 Enviando autenticação...";
 
-    const text = await response.text();
+    const loginResponse = await fetch(
+      "https://apiv3.mobieduca.me/login/run",
+      {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+          "Accept": "application/json, text/plain, */*"
+        },
+        body: new URLSearchParams({
+          email: user,
+          senha: password
+        })
+      }
+    );
 
-    if(!response.ok){
-      throw new Error("HTTP " + response.status);
+    const loginText = await loginResponse.text();
+
+    if(!loginResponse.ok){
+      throw new Error(
+        "Login recusado. HTTP " + loginResponse.status
+      );
     }
 
     result.innerHTML = `
-      <strong>🟢 Resposta recebida do Monitora</strong><br>
-      Status HTTP: ${response.status}<br>
-      <small>Próxima etapa: validar sessão e consultar escolas.</small>
+      🟢 Login aceito<br>
+      🟡 Testando consulta de escolas...
     `;
 
-    console.log("Resposta login Monitora:", text);
+    /*
+      Primeira consulta somente leitura.
+      Ainda não grava nada no MFS.
+    */
+    const schoolsResponse = await fetch(
+      "https://apiv3.mobieduca.me/escola/rel_presenca_diario",
+      {
+        method:"POST",
+        credentials:"include",
+        headers:{
+          "Content-Type":"application/x-www-form-urlencoded",
+          "Accept":"application/json"
+        },
+        body:new URLSearchParams({
+          data:new Date().toLocaleDateString("pt-BR"),
+          ano:"2026",
+          situacao:"F",
+          pg:"1",
+          limit:"100",
+          inc_num_turmas:"1",
+          inc_tecnico:"1",
+          inc_diretores:"1",
+          inc_total_calendario:"1"
+        })
+      }
+    );
+
+    const schoolsText = await schoolsResponse.text();
+
+    result.innerHTML = `
+      🟢 Conexão concluída<br><br>
+      Login: OK<br>
+      Consulta escolas: ${schoolsResponse.status}<br>
+      <small>Resposta recebida. Próxima etapa: interpretar dados.</small>
+    `;
+
+    console.log("Login retorno:", loginText);
+    console.log("Escolas retorno:", schoolsText);
 
   } catch(error) {
-    console.error("Sync Monitora erro:", error);
+    console.error("Sync Monitora:", error);
 
     result.innerHTML = `
-      🔴 Não foi possível conectar diretamente.<br>
-      Motivo: ${escapeHtml(error.message)}<br>
-      <small>
-      Se aparecer bloqueio CORS, precisaremos usar um conector local/navegador.
-      </small>
+      🔴 Falha na sincronização<br>
+      ${escapeHtml(error.message)}<br>
+      <small>Nenhum dado foi alterado.</small>
     `;
+  } finally {
+    if($("#syncPassword")){
+      $("#syncPassword").value="";
+    }
   }
 }
 
