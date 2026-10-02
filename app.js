@@ -1520,7 +1520,11 @@ function switchView(view) {
 
 
 function companionStatusLabel(char){return STATUS_INFO[char]?.label||"Desconhecido";}
-function companionStatusFromTurn(turn){return turn?.status&&STATUS_INFO[turn.status]?turn.status:".";}
+function companionStatusFromTurn(turn){
+  const aulaRegistrada = turn?.aulaRegistrada === true || turn?.aulaRegistrada === 1 || turn?.aulaRegistrada === "1" || turn?.sourceStatus?.aulaRegistrada === true;
+  if(aulaRegistrada) return "G";
+  return turn?.status && STATUS_INFO[turn.status] ? turn.status : ".";
+}
 function companionShift(code){return SHIFT_CODES[String(code||"").toUpperCase()]||null;}
 function findSchoolByName(name){const n=normalizeText(name);if(!n)return null;return Object.entries(state.schools).map(([id,meta])=>({id,meta})).find(item=>normalizeText(item.meta?.name||"")===n)||null;}
 function safeReason(value){if(!value)return"";if(typeof value==="string")return value;try{return JSON.stringify(value);}catch{return String(value);}}
