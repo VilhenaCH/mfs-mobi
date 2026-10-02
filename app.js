@@ -2561,11 +2561,20 @@ async function applyCompanionSync() {
 }
 
 function bindCompanionBridge() {
+  const handlePayload = payload => {
+    if (!payload || payload.source !== "monitora") return;
+    receiveCompanionSync(payload);
+  };
+
+  document.addEventListener("mfs-companion-sync", event => {
+    handlePayload(event.detail);
+  });
+
   window.addEventListener("message", event => {
-    if (event.source !== window) return;
+    if (event.origin !== window.location.origin) return;
     const data = event.data;
     if (!data || data.source !== "mfs-companion" || data.type !== "SYNC_DATA") return;
-    receiveCompanionSync(data.payload);
+    handlePayload(data.payload);
   });
 }
 
