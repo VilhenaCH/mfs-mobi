@@ -446,3 +446,6 @@ body.monitor-performance-mode .storage-chip .pulse-dot{animation:none!important}
  font-size:10px;
  line-height:1.5;
 }
+
+.sync-companion-preview{margin-top:12px;padding:12px;border:1px solid rgba(139,92,246,.22);border-radius:14px;background:rgba(20,20,30,.72)}
+.sync-preview-head{display:flex;justify-content:space-between;gap:10px;font-size:12px}.sync-preview-head span{color:var(--muted,#8990a7);font-size:10px}.sync-preview-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:10px}.sync-preview-grid>div{padding:9px;border-radius:10px;background:rgba(255,255,255,.035);text-align:center}.sync-preview-grid strong{display:block;font-size:16px}.sync-preview-grid small{color:var(--muted,#8990a7);font-size:9px}.sync-preview-note{margin-top:10px;color:#9da4b8;font-size:10px;line-height:1.45}

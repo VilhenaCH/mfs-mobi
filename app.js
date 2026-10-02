@@ -103,6 +103,7 @@ let app = null;
 let auth = null;
 let db = null;
 let toastTimer = null;
+let companionSyncPreview = null;
 let calendarObserver = null;
 let monitorRenderTimer = null;
 let monitorSearchTimer = null;
@@ -2398,117 +2399,174 @@ function switchView(view) {
 
 
 async function runMonitoraSyncTest(){
+  openSyncModal();
   const result = $("#syncResult");
-  const user = $("#syncUser")?.value?.trim();
-  const password = $("#syncPassword")?.value;
+  if (result) result.innerHTML = "Abra o Monitora e use o MFS Companion para sincronizar. Nenhum dado é alterado por este botão.";
+}
 
-  if(!user || !password){
-    result.textContent = "Informe usuário e senha.";
+
+
+function companionShiftLabel(code) {
+  return SHIFT_LABELS[SHIFT_CODES[String(code || "").toUpperCase()]] || code || "—";
+}
+
+function companionStatusLabel(char) {
+  return STATUS_INFO[char]?.label || "Desconhecido";
+}
+
+function companionStatusFromTurn(turn) {
+  if (turn?.status && STATUS_INFO[turn.status]) return turn.status;
+  return ".";
+}
+
+async function receiveCompanionSync(payload) {
+  if (!payload || payload.source !== "monitora") return;
+  if (!state.user || !state.profile?.active) {
+    showToast("Entre no MFS antes de receber uma sincronização.");
     return;
   }
 
-  result.innerHTML = "🟡 Iniciando sessão no Monitora...";
+  try {
+    const date = String(payload.date || "");
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Data inválida recebida do Companion.");
+    const month = date.slice(0, 7);
+    const day = Number(date.slice(-2));
+    const records = await getMonthRecordsOnce(month);
+
+    const rows = [];
+    let ignored = 0;
+    let changed = 0;
+    let same = 0;
+    let schoolsFound = 0;
+
+    for (const incoming of Array.isArray(payload.schools) ? payload.schools : []) {
+      let schoolId = String(incoming.id || "");
+      let meta = state.schools[schoolId];
+      if (!meta) {
+        const match = findSchoolByCSVName(incoming.name || "");
+        if (match) { schoolId = match.id; meta = match.meta; }
+      }
+      if (!schoolId || !meta) { ignored++; continue; }
+      schoolsFound++;
+
+      const current = records[schoolId] || { s: {} };
+      const expected = effectiveShiftsForSchool(schoolId, current);
+      const apiTurns = Array.isArray(incoming.turns) ? incoming.turns : [];
+
+      for (const turn of apiTurns) {
+        const shift = SHIFT_CODES[String(turn.code || "").toUpperCase()];
+        if (!shift) continue;
+        const after = companionStatusFromTurn(turn);
+        const before = statusChar(current, shift, day);
+        const applicable = !hasExpectedRosterV2(meta) || expected.includes(shift);
+        rows.push({ schoolId, schoolName: incoming.name || meta.name || schoolId, shift, before, after, applicable, reason: turn.justificativas ? `${turn.justificativas} justificativa(s)` : "" });
+        if (!applicable) { ignored++; continue; }
+        if (before !== after) changed++; else same++;
+      }
+    }
+
+    companionSyncPreview = { payload, date, month, day, rows, records, ignored, changed, same, schoolsFound };
+    openSyncModal();
+    const result = $("#syncResult");
+    const preview = $("#companionSyncPreview");
+    const apply = $("#applyCompanionSync");
+    if (result) result.innerHTML = `<strong>🟢 Monitora sincronizado</strong><br>${schoolsFound} escolas reconhecidas · ${changed} alterações · ${same} situações mantidas · ${ignored} ignoradas.`;
+    if (preview) {
+      preview.hidden = false;
+      preview.innerHTML = `
+        <div class="sync-preview-head"><strong>${escapeHtml(formatDateBR(date))}</strong><span>${escapeHtml(payload.schoolCount || schoolsFound)} escolas recebidas</span></div>
+        <div class="sync-preview-grid">
+          <div><strong>${changed}</strong><small>mudam</small></div>
+          <div><strong>${same}</strong><small>mantidas</small></div>
+          <div><strong>${ignored}</strong><small>ignoradas</small></div>
+        </div>
+        <div class="sync-preview-note">A prévia respeita a grade de turnos esperados já calibrada pelo CSV. Turnos que não são esperados não serão gravados como operação atual.</div>
+      `;
+    }
+    if (apply) { apply.hidden = false; apply.disabled = changed === 0; }
+  } catch (error) {
+    console.error("Companion sync:", error);
+    showToast(error.message || "Não foi possível preparar a sincronização.");
+  }
+}
+
+async function applyCompanionSync() {
+  const preview = companionSyncPreview;
+  if (!preview || !preview.rows?.length) return;
+
+  const { date, month, day, rows, records } = preview;
+  const operations = [];
+  const changedBySchool = new Map();
+
+  rows.forEach(row => {
+    if (!row.applicable || row.before === row.after) return;
+    const current = clone(records[row.schoolId] || { s: {} });
+    setStatusChar(current, row.shift, day, row.after, month);
+    changedBySchool.set(row.schoolId, current);
+  });
+
+  changedBySchool.forEach((record, schoolId) => {
+    operations.push(batch => batch.set(
+      doc(db, "months", month, "schools", schoolId),
+      {
+        schoolId,
+        month,
+        s: record.s,
+        source: "monitora-companion",
+        sourceDate: date,
+        updatedAt: serverTimestamp(),
+        updatedBy: state.user.uid
+      },
+      { merge: true }
+    ));
+  });
+
+  if (!operations.length) {
+    showToast("Nenhuma alteração aplicável encontrada.");
+    return;
+  }
 
   try {
-    /*
-      v0.9.4:
-      Primeiro criamos uma sessão de navegador.
-      Não salvamos cookies nem credenciais.
-    */
-    const sessionStart = await fetch(
-      "https://monitora.mobieduca.me/",
-      {
-        method: "GET",
-        credentials: "include",
-        headers: {
-          "Accept": "text/html,application/xhtml+xml"
-        }
-      }
-    );
+    await commitWriteOperationsInChunks(operations);
+    await setDoc(doc(db, "months", month), {
+      label: monthLabel(month),
+      updatedAt: serverTimestamp(),
+      updatedBy: state.user.uid,
+      lastSource: "monitora-companion",
+      lastMonitoraSyncDate: date
+    }, { merge: true });
+    await addDoc(collection(db, "imports"), {
+      type: "monitora-companion",
+      date,
+      month,
+      schoolCount: changedBySchool.size,
+      createdAt: serverTimestamp(),
+      createdBy: state.user.uid,
+      createdByEmail: state.user.email || ""
+    });
 
-    result.innerHTML = "🟢 Sessão inicial criada<br>🟡 Enviando autenticação...";
-
-    const loginResponse = await fetch(
-      "https://apiv3.mobieduca.me/login/run",
-      {
-        method: "POST",
-        credentials: "include",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          "Accept": "application/json, text/plain, */*"
-        },
-        body: new URLSearchParams({
-          email: user,
-          senha: password
-        })
-      }
-    );
-
-    const loginText = await loginResponse.text();
-
-    if(!loginResponse.ok){
-      throw new Error(
-        "Login recusado. HTTP " + loginResponse.status
-      );
-    }
-
-    result.innerHTML = `
-      🟢 Login aceito<br>
-      🟡 Testando consulta de escolas...
-    `;
-
-    /*
-      Primeira consulta somente leitura.
-      Ainda não grava nada no MFS.
-    */
-    const schoolsResponse = await fetch(
-      "https://apiv3.mobieduca.me/escola/rel_presenca_diario",
-      {
-        method:"POST",
-        credentials:"include",
-        headers:{
-          "Content-Type":"application/x-www-form-urlencoded",
-          "Accept":"application/json"
-        },
-        body:new URLSearchParams({
-          data:new Date().toLocaleDateString("pt-BR"),
-          ano:"2026",
-          situacao:"F",
-          pg:"1",
-          limit:"100",
-          inc_num_turmas:"1",
-          inc_tecnico:"1",
-          inc_diretores:"1",
-          inc_total_calendario:"1"
-        })
-      }
-    );
-
-    const schoolsText = await schoolsResponse.text();
-
-    result.innerHTML = `
-      🟢 Conexão concluída<br><br>
-      Login: OK<br>
-      Consulta escolas: ${schoolsResponse.status}<br>
-      <small>Resposta recebida. Próxima etapa: interpretar dados.</small>
-    `;
-
-    console.log("Login retorno:", loginText);
-    console.log("Escolas retorno:", schoolsText);
-
-  } catch(error) {
-    console.error("Sync Monitora:", error);
-
-    result.innerHTML = `
-      🔴 Falha na sincronização<br>
-      ${escapeHtml(error.message)}<br>
-      <small>Nenhum dado foi alterado.</small>
-    `;
-  } finally {
-    if($("#syncPassword")){
-      $("#syncPassword").value="";
-    }
+    companionSyncPreview = null;
+    $("#applyCompanionSync").hidden = true;
+    $("#applyCompanionSync").disabled = true;
+    $("#companionSyncPreview").hidden = true;
+    $("#syncResult").innerHTML = `<strong>🟢 Sincronização aplicada</strong><br>${changedBySchool.size} escolas tiveram alterações gravadas no MFS.`;
+    if (month === state.month) subscribeMonthRecords(month);
+    renderCharges($("#dailyDate")?.value || date);
+    refreshAssistantStatus();
+    showToast("Sincronização do Monitora aplicada ao MFS.");
+  } catch (error) {
+    console.error("Erro ao aplicar Companion Sync:", error);
+    showToast("A sincronização não pôde ser gravada no Firestore.");
   }
+}
+
+function bindCompanionBridge() {
+  window.addEventListener("message", event => {
+    if (event.source !== window) return;
+    const data = event.data;
+    if (!data || data.source !== "mfs-companion" || data.type !== "SYNC_DATA") return;
+    receiveCompanionSync(data.payload);
+  });
 }
 
 function openSyncModal(){
@@ -2523,6 +2581,7 @@ function bindEvents() {
   $("#closeSyncModal")?.addEventListener("click",closeSyncModal);
   $("#cancelSync")?.addEventListener("click",closeSyncModal);
   $("#runSync")?.addEventListener("click",runMonitoraSyncTest);
+  $("#applyCompanionSync")?.addEventListener("click",applyCompanionSync);
   $("#googleLoginButton")?.addEventListener("click",async()=>{
     try { const provider=new GoogleAuthProvider(); provider.setCustomParameters({prompt:"select_account"}); await signInWithPopup(auth,provider); }
     catch(error){console.error(error);showToast("Não foi possível entrar com Google.");}
@@ -2619,6 +2678,7 @@ function bindEvents() {
 }
 
 bindEvents();
+bindCompanionBridge();
 initCustomSelectSystem();
 initMotionInteractions();
 startFirebase().catch(error=>{console.error(error);showOnlyGate("configGate");});

@@ -35,3 +35,8 @@ O mês atual usa a grade esperada v2. Meses anteriores continuam exibindo os tur
 ## Firebase Rules
 
 É obrigatório publicar o `firestore.rules` desta versão antes de usar a nova calibração.
+
+
+## MFS Companion
+
+A extensão MFS Companion usa a sessão já autenticada no Monitora para fazer sincronização manual. Ela não pede nem armazena a senha do Monitora. A aplicação recebe uma prévia e exige confirmação antes de gravar.

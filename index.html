@@ -365,19 +365,18 @@
 <div class="modal-backdrop" id="syncMonitoraModal" aria-hidden="true">
   <div class="status-modal sync-modal">
     <div class="modal-accent"></div>
-    <header class="modal-header"><div><p class="eyebrow">Integração manual</p><h3>Sync Monitora</h3></div><button class="modal-close" id="closeSyncModal" type="button">×</button></header>
+    <header class="modal-header"><div><p class="eyebrow">MFS Companion</p><h3>Sync Monitora</h3></div><button class="modal-close" id="closeSyncModal" type="button">×</button></header>
     <div class="modal-body">
-      <p class="muted">Teste de conexão com o Monitora usando seu acesso autorizado. A senha não será salva.</p>
-      <div class="field"><label>Usuário / Email</label><input id="syncUser" type="text"></div>
-      <div class="field"><label>Senha</label><input id="syncPassword" type="password"></div>
-      <div id="syncResult" class="sync-result">Aguardando conexão...</div>
+      <p class="muted">Abra o Monitora em uma aba e use o <strong>MFS Companion</strong>. O MFS receberá uma prévia antes de gravar qualquer alteração.</p>
+      <div id="syncResult" class="sync-result">Aguardando sincronização do Companion...</div>
+      <div id="companionSyncPreview" class="sync-companion-preview" hidden></div>
     </div>
-    <footer class="modal-footer"><button class="button ghost" id="cancelSync" type="button">Cancelar</button><button class="button primary" id="runSync" type="button">Conectar</button></footer>
+    <footer class="modal-footer"><button class="button ghost" id="cancelSync" type="button">Fechar</button><button class="button primary" id="applyCompanionSync" type="button" hidden disabled>Aplicar no MFS</button></footer>
   </div>
 </div>
 
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="firebase-config.js?v=0.8.2"></script>
-  <script type="module" src="app.js?v=0.8.2"></script>
+  <script src="firebase-config.js?v=0.8.3"></script>
+  <script type="module" src="app.js?v=0.9.5"></script>
 </body>
 </html>
