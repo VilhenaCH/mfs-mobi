@@ -45,14 +45,7 @@ const STATUS_INFO = {
   "?": { key: "desconhecido", label: "Desconhecido", cls: "blank", short: "?" }
 };
 const STATUS_CHAR = { enviada: "G", pendente: "R", justificada: "J", nao_letivo: "X", sem_registro: "." };
-const COLOR_CHAR = {
-  "rgb(0,169,157)": "G",
-  "rgb(244,34,34)": "R",
-  "rgb(247,149,34)": "J",
-  "rgb(100,112,121)": "X"
-};
 const MONTH_NAMES = ["Janeiro","Fevereiro","Março","Abril","Maio","Junho","Julho","Agosto","Setembro","Outubro","Novembro","Dezembro"];
-const MONTH_INDEX = { janeiro:1, fevereiro:2, marco:3, abril:4, maio:5, junho:6, julho:7, agosto:8, setembro:9, outubro:10, novembro:11, dezembro:12 };
 
 const state = {
   user: null,
@@ -68,6 +61,11 @@ const state = {
   dailyPreview: null,
   chargeGroups: [],
   chargeView: sessionStorage.getItem("mfs-charge-view") || "cards",
+  opsDate: localISODate(),
+  opsShift: "TODOS",
+  opsChargeView: sessionStorage.getItem("mfs-ops-charge-view") || "cards",
+  opsChargeGroups: [],
+  syncRuns: [],
   editor: null,
   bulkSelection: new Map(),
   dragSelection: null,
@@ -104,6 +102,8 @@ let auth = null;
 let db = null;
 let toastTimer = null;
 let companionSyncPreview = null;
+let companionApplyChain = Promise.resolve();
+const companionProcessedChunks = new Map();
 let calendarObserver = null;
 let monitorRenderTimer = null;
 let monitorSearchTimer = null;
@@ -425,44 +425,20 @@ function normalizeShiftList(list) {
   return SHIFT_ORDER.filter(shift => values.includes(shift));
 }
 
-function normalizeExpectedShiftRoster(value) {
-  const source = value && typeof value === "object" && !Array.isArray(value) ? value : {};
-  const out = {};
-  SHIFT_ORDER.forEach(shift => {
-    if (typeof source[shift] === "boolean") out[shift] = source[shift];
-  });
-  return out;
-}
-
-function hasExpectedRosterV2(meta) {
-  return Number(meta?.expectedShiftRosterVersion || 0) >= EXPECTED_ROSTER_VERSION;
-}
-
 function effectiveShiftsForSchool(schoolId, record = null) {
   const meta = state.schools[schoolId] || {};
-
-  // v2: o CSV calibra cada turno de modo independente. Somente flags
-  // explicitamente verdadeiras são exibidas/cobradas. Isso elimina a lista
-  // expectedShifts antiga, que podia ter sido contaminada por uma importação.
-  if (hasExpectedRosterV2(meta)) {
-    const roster = normalizeExpectedShiftRoster(meta.expectedShiftRoster);
-    return SHIFT_ORDER.filter(shift => roster[shift] === true);
+  // Quando o Companion já calibrou a escola, inclusive uma lista vazia é intencional.
+  if (meta.expectedShiftSource === "companion" && Array.isArray(meta.expectedShifts)) {
+    return normalizeShiftList(meta.expectedShifts);
   }
-
-  // Compatibilidade temporária com a base anterior, até a primeira calibração v2.
-  if (Array.isArray(meta.expectedShifts)) return normalizeShiftList(meta.expectedShifts);
+  // Compatibilidade temporária com bases anteriores até a primeira sincronização Companion.
+  if (Array.isArray(meta.expectedShifts) && meta.expectedShifts.length) return normalizeShiftList(meta.expectedShifts);
   if (Array.isArray(meta.shifts) && meta.shifts.length) return normalizeShiftList(meta.shifts);
   return recordShifts(record || state.records[schoolId]);
 }
 
 function expectedShiftSeed(schoolId, record = null) {
-  const meta = state.schools[schoolId] || {};
-  if (hasExpectedRosterV2(meta)) return effectiveShiftsForSchool(schoolId, record);
-  if (Array.isArray(meta.expectedShifts)) return normalizeShiftList(meta.expectedShifts);
-  const legacy = new Set();
-  if (Array.isArray(meta.shifts)) meta.shifts.forEach(shift => { if (SHIFT_ORDER.includes(shift)) legacy.add(shift); });
-  recordShifts(record || state.records[schoolId]).forEach(shift => legacy.add(shift));
-  return SHIFT_ORDER.filter(shift => legacy.has(shift));
+  return effectiveShiftsForSchool(schoolId, record);
 }
 
 function expectedShiftLabelList(schoolId, record = null) {
@@ -567,7 +543,7 @@ async function requestAccess(user) {
 }
 
 function cleanupSubscriptions() {
-  for (const key of ["unsubSchools","unsubMonths","unsubMonthRecords","unsubTasks","unsubAssistantSettings","unsubAssistantEvents"]) {
+  for (const key of ["unsubSchools","unsubMonths","unsubMonthRecords","unsubTasks","unsubAssistantSettings","unsubAssistantEvents","unsubSyncRuns"]) {
     if (typeof state[key] === "function") state[key]();
     state[key] = null;
   }
@@ -595,15 +571,15 @@ function enterAuthorizedApp() {
     avatar.hidden = true;
   }
   $$(".admin-only").forEach(el => { el.hidden = !isAdmin(); });
-  if ($("#dailyDate") && !$("#dailyDate").value) $("#dailyDate").value = localISODate();
+  if ($("#opsDate") && !$("#opsDate").value) $("#opsDate").value = localISODate();
   subscribeSchools();
   subscribeMonths();
   subscribeMonthRecords(state.month);
-  renderCharges($("#dailyDate")?.value);
+  subscribeSyncRuns();
   if (isAdmin()) loadUserManagement();
   enhanceAllSelects();
   startAssistantEngine();
-  scheduleTodayPendingSync(900);
+
 }
 
 function subscribeSchools() {
@@ -613,7 +589,7 @@ function subscribeSchools() {
     state.schools = schools;
     renderSchoolHistorySelector();
     scheduleMonitorRender();
-    scheduleTodayPendingSync(500);
+
   }, error => {
     console.error(error);
     showToast("Falha ao carregar as escolas do Firestore.");
@@ -640,8 +616,7 @@ function subscribeMonthRecords(month) {
     snapshot.forEach(snap => records[snap.id] = snap.data());
     state.records = records;
     scheduleMonitorRender();
-    scheduleTodayPendingSync(500);
-    if ($("#dailyDate")?.value?.startsWith(month)) renderCharges($("#dailyDate").value);
+
   }, error => {
     console.error(error);
     showToast(`Não foi possível carregar ${monthLabel(month)}.`);
@@ -829,8 +804,8 @@ function renderMonitor() {
   $("#monthTitle").textContent = monthLabel(state.month);
   const meta = state.months[state.month] || {};
   const sourceParts = [];
-  if (meta.lastMonitoraFile) sourceParts.push(`Monitora: ${meta.lastMonitoraFile}`);
-  if (meta.lastDailyFile) sourceParts.push(`CSV: ${meta.lastDailyFile}`);
+  if (meta.lastCompanionSyncAt) sourceParts.push("MFS Companion sincronizado");
+  if (meta.lastCompanionRange) sourceParts.push(meta.lastCompanionRange);
   sourceParts.push("dados protegidos no Firestore");
   $("#sourceInfo").textContent = sourceParts.join(" · ");
   $("#monthSelect").value = state.month;
@@ -851,7 +826,7 @@ function renderMonitor() {
 
   if (!filtered.length) {
     if (calendarObserver) calendarObserver.disconnect();
-    $("#schoolList").innerHTML = `<article class="card empty-card large-empty"><strong>${Object.keys(state.records).length ? "Nenhuma escola encontrada" : "Banco sem dados para este mês"}</strong><span>${Object.keys(state.records).length ? "Ajuste os filtros." : (isAdmin() ? "Importe o HTML do Monitora para popular o Firestore." : "Aguarde um administrador importar a base deste mês.")}</span></article>`;
+    $("#schoolList").innerHTML = `<article class="card empty-card large-empty"><strong>${Object.keys(state.records).length ? "Nenhuma escola encontrada" : "Banco sem dados para este mês"}</strong><span>${Object.keys(state.records).length ? "Ajuste os filtros." : "Sincronize o Monitora pelo MFS Companion para popular este mês."}</span></article>`;
     return;
   }
   $("#schoolList").innerHTML = filtered.map(([id, record]) => renderSchoolCard(id, state.schools[id] || {id,name:id}, record, state.month)).join("");
@@ -899,10 +874,8 @@ function renderSchoolCard(id, meta, record, month) {
   const counts = perSchoolCounts(record, shifts);
   const nonSchool = Object.entries(record?.n || {}).map(([day, reason]) => `${day}: ${reason}`).join(" · ");
   const expectedText = expected.length ? expected.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Nenhum turno esperado";
-  const csvDefined = hasExpectedRosterV2(meta) || Array.isArray(meta?.expectedShifts);
-  const calibratedCount = hasExpectedRosterV2(meta) ? Object.keys(normalizeExpectedShiftRoster(meta.expectedShiftRoster)).length : 0;
   return `<article class="card school-card" data-school-id="${escapeHtml(id)}" data-calendar-hydrated="0">
-    <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}<span class="meta-pill expected-shifts-pill" title="Turnos esperados definidos pelo CSV diário">${hasExpectedRosterV2(meta) ? `CSV ${calibratedCount}/4` : (csvDefined ? "CSV legado" : "Legado")}: ${escapeHtml(expectedText)}</span></div></div><div class="school-head-actions"><button class="school-profile-button" type="button" data-school-history="${escapeHtml(id)}">Histórico</button><button class="school-profile-button" type="button" data-school-profile="${escapeHtml(id)}">Perfil</button><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></div></header>
+    <header class="school-head"><div class="school-name"><h3>${escapeHtml(meta?.name || id)}</h3><div class="school-meta">${meta?.area ? `<span class="meta-pill">${escapeHtml(meta.area)}</span>` : ""}${meta?.city ? `<span class="meta-pill">${escapeHtml(meta.city)}</span>` : ""}${meta?.inep ? `<span class="meta-pill">INEP ${escapeHtml(meta.inep)}</span>` : ""}<span class="meta-pill expected-shifts-pill" title="Turnos recebidos pelo MFS Companion">Companion: ${escapeHtml(expectedText)}</span></div></div><div class="school-head-actions"><button class="school-profile-button" type="button" data-school-history="${escapeHtml(id)}">Histórico</button><button class="school-profile-button" type="button" data-school-profile="${escapeHtml(id)}">Perfil</button><div class="school-counts"><div class="school-count"><strong>${counts.G}</strong><small>freq.</small></div><div class="school-count"><strong>${counts.R}</strong><small>pend.</small></div><div class="school-count"><strong>${counts.J}</strong><small>just.</small></div></div></div></header>
     <div class="school-calendar virtual-calendar">${virtualCalendarPlaceholder()}</div>
     <div class="school-footer"><span class="hint">Clique em M, T, N ou I para editar</span><span class="non-school-note" title="${escapeHtml(nonSchool)}">${nonSchool ? `Ocorrências: ${escapeHtml(nonSchool)}` : "Sem ocorrências cadastradas"}</span></div>
   </article>`;
@@ -993,7 +966,7 @@ async function saveStatusEditor() {
 
     const editedDate = `${month}-${String(day).padStart(2,"0")}`;
     closeStatusEditor();
-    if ($("#dailyDate")?.value === editedDate) renderCharges(editedDate);
+    if ($("#opsDate")?.value === editedDate) renderOpsCenter();
     showToast(`Status atualizado: ${STATUS_INFO[after]?.label || "Sem registro"}.`);
   } catch (error) {
     console.error(error);
@@ -1001,238 +974,17 @@ async function saveStatusEditor() {
   }
 }
 
-function parseMonthYearFromCard(card) {
-  for (const b of card.querySelectorAll("b")) {
-    const text = b.textContent.replace(/\s+/g," ").trim();
-    const match = text.match(/([A-Za-zÀ-ÿ]+)\s+de\s+(20\d{2})/i);
-    if (!match) continue;
-    const month = MONTH_INDEX[normalizeText(match[1])];
-    if (month) return { year:Number(match[2]), month, key:`${match[2]}-${String(month).padStart(2,"0")}` };
-  }
-  return null;
-}
 
-function backgroundChar(span) {
-  const normalized = (span.style.backgroundColor || "").replace(/\s+/g,"").toLowerCase();
-  return COLOR_CHAR[normalized] || "?";
-}
 
-function directDivTexts(header) {
-  if (!header) return [];
-  return [...header.children].filter(el => el.tagName === "DIV").map(el => el.textContent.replace(/\s+/g," ").trim());
-}
 
-function parseReasons(card) {
-  const map = {};
-  const block = card.querySelector(".lista-justificativas");
-  if (!block) return map;
-  [...block.children].forEach(div => {
-    const text = div.textContent.replace(/\s+/g," ").trim();
-    if (!text.includes(":")) return;
-    const reason = text.slice(0,text.indexOf(":")).trim();
-    const rest = text.slice(text.indexOf(":") + 1);
-    if (normalizeText(reason) === "justificativas") return;
-    const regex = /\b([MTNI])\s*-\s*([0-9; ,]+)/g;
-    let match;
-    while ((match = regex.exec(rest))) {
-      const shift = SHIFT_CODES[match[1]];
-      [...match[2].matchAll(/\d{1,2}/g)].map(m => Number(m[0])).forEach(day => { map[String(day)] ||= {}; map[String(day)][shift] = reason; });
-    }
-  });
-  return map;
-}
 
-function parseNonSchoolReasons(card) {
-  const map = {};
-  const block = card.querySelector(".dias-nao-letivos");
-  if (!block) return map;
-  [...block.children].forEach(span => {
-    const text = span.textContent.replace(/\s+/g," ").trim();
-    if (!text.includes(":")) return;
-    const reason = text.slice(0,text.indexOf(":")).trim();
-    const rest = text.slice(text.indexOf(":") + 1);
-    [...rest.matchAll(/\d{1,2}/g)].forEach(m => map[String(Number(m[0]))] = reason);
-  });
-  return map;
-}
 
-function parseMonitoraCard(card) {
-  const my = parseMonthYearFromCard(card);
-  if (!my) return null;
-  const lines = directDivTexts(card.querySelector(".escola-header"));
-  if (!lines.length) return null;
-  const name = lines[0] || "";
-  const area = lines[1] || "";
-  const city = (lines[2] || "").replace(/^Cidade:\s*/i,"").trim();
-  const inep = (lines[3] || "").replace(/^Inep:\s*/i,"").trim();
-  const sourceId = card.dataset.id || "";
-  const id = inep || sourceId || normalizeText(name).replace(/[^a-z0-9]+/g,"-");
-  const reasons = parseReasons(card);
-  const nonSchoolReasons = parseNonSchoolReasons(card);
-  const table = card.querySelector("table");
-  if (!table) return null;
-  const rows = [...table.querySelectorAll("tr")];
-  const raw = {};
-  const shiftCodes = new Set();
-  rows.forEach((row, idx) => {
-    const cells = [...row.children].filter(el => ["TD","TH"].includes(el.tagName));
-    const headers = [];
-    cells.forEach((cell, ci) => {
-      const text = cell.textContent.replace(/\s+/g," ").trim();
-      const m = text.match(/^([A-ZÇ]{3})\s+(\d{1,2})$/);
-      if (m) headers.push({ ci, weekday:m[1], day:Number(m[2]) });
-    });
-    if (!headers.length || !rows[idx + 1]) return;
-    const dataCells = [...rows[idx + 1].children].filter(el => el.tagName === "TD");
-    headers.forEach(h => {
-      const cell = dataCells[h.ci];
-      if (!cell) return;
-      const badges = [...cell.querySelectorAll("span.turno-badge")].map(span => {
-        const code = span.textContent.replace(/\s+/g," ").trim();
-        let dataId = span.dataset.id || "";
-        if (!dataId && SHIFT_CODES[code]) dataId = code;
-        if (SHIFT_CODES[dataId]) shiftCodes.add(dataId);
-        return { code, dataId, ch:backgroundChar(span) };
-      });
-      raw[h.day] = { weekday:h.weekday, badges };
-    });
-  });
-  const ndays = new Date(my.year, my.month, 0).getDate();
-  const strings = {};
-  ["M","T","N","I"].filter(code => shiftCodes.has(code)).forEach(code => {
-    let str = "";
-    for (let day = 1; day <= ndays; day++) {
-      const badges = raw[day]?.badges || [];
-      const explicit = badges.find(b => b.dataId === code);
-      const weekend = badges.some(b => b.code === "S" || b.code === "D");
-      str += explicit ? explicit.ch : weekend ? "X" : ".";
-    }
-    strings[SHIFT_CODES[code]] = str;
-  });
-  const record = { s:strings };
-  if (Object.keys(reasons).length) record.r = reasons;
-  if (Object.keys(nonSchoolReasons).length) record.n = nonSchoolReasons;
-  return { month:my.key, meta:{ id,name,area,city,inep:inep || id }, record };
-}
 
-function parseMonitoraHTML(html, fileName) {
-  const docHtml = new DOMParser().parseFromString(html,"text/html");
-  const cards = [...docHtml.querySelectorAll("#escola-pdf2 .card.mb-3")];
-  if (!cards.length) throw new Error("Não encontrei os cartões do Acompanhamento de Frequência neste HTML.");
-  const parsed = cards.map(parseMonitoraCard).filter(Boolean);
-  if (!parsed.length) throw new Error("Não encontrei dados mensais no HTML.");
-  const months = [...new Set(parsed.map(p => p.month))];
-  if (months.length !== 1) throw new Error("Não foi possível identificar um único mês neste arquivo.");
-  const records = {}, schoolsMeta = {};
-  parsed.forEach(p => { records[p.meta.id] = p.record; schoolsMeta[p.meta.id] = p.meta; });
-  return { month:months[0], fileName, records, schoolsMeta };
-}
 
-function importCounts(records) {
-  return countStatuses(records,"TODOS");
-}
 
-function diffImport(parsed, currentRecords) {
-  const ndays = daysInMonth(parsed.month);
-  let changes=0,resolved=0,newPending=0,newJustified=0,newFrequency=0;
-  Object.entries(parsed.records).forEach(([id,next]) => {
-    const prev = currentRecords[id] || {s:{}};
-    const shifts = [...new Set([...recordShifts(prev),...recordShifts(next)])];
-    shifts.forEach(shift => {
-      for (let day=1; day<=ndays; day++) {
-        const a=statusChar(prev,shift,day), b=statusChar(next,shift,day);
-        if (a===b) continue;
-        changes++;
-        if (a==="R" && ["G","J"].includes(b)) resolved++;
-        if (b==="R" && a!=="R") newPending++;
-        if (b==="J" && a!=="J") newJustified++;
-        if (b==="G" && a!=="G") newFrequency++;
-      }
-    });
-  });
-  return {changes,resolved,newPending,newJustified,newFrequency,currentSchools:Object.keys(currentRecords).length};
-}
 
-function buildImportTransitionRows(parsed, currentRecords) {
-  const rows = [];
-  const ndays = daysInMonth(parsed.month);
-  Object.entries(parsed.records).forEach(([id, next]) => {
-    const prev = currentRecords[id] || { s: {} };
-    const meta = parsed.schoolsMeta[id] || state.schools[id] || { name: id };
-    const shifts = recordShifts(next);
-    shifts.forEach(shift => {
-      for (let day = 1; day <= ndays; day++) {
-        const before = statusChar(prev, shift, day);
-        const after = statusChar(next, shift, day);
-        const reason = next?.r?.[String(day)]?.[shift] || (after === "X" ? next?.n?.[String(day)] : "") || "";
-        rows.push({ id, schoolName: meta.name || id, day, shift, before, after, reason });
-      }
-    });
-  });
-  return rows;
-}
 
-function renderImportPreview(parsed, currentRecords) {
-  const counts = importCounts(parsed.records);
-  const diff = diffImport(parsed,currentRecords);
-  const schoolCount = Object.keys(parsed.records).length;
-  const transitions = buildImportTransitionRows(parsed, currentRecords);
-  const changed = transitions.filter(row => row.before !== row.after).length;
-  const same = transitions.length - changed;
-  $("#previewTitle").textContent = `${parsed.fileName} · ${monthLabel(parsed.month)}`;
-  $("#importPreview").className = "";
-  $("#importPreview").innerHTML = `
-    <div class="preview-grid">
-      <div class="preview-stat"><strong>${schoolCount}</strong><span>escolas encontradas</span></div>
-      <div class="preview-stat"><strong>${counts.R || 0}</strong><span>pendências no arquivo</span></div>
-      <div class="preview-stat"><strong>${changed}</strong><span>situações que mudam</span></div>
-      <div class="preview-stat"><strong>${same}</strong><span>situações mantidas</span></div>
-    </div>
-    <div class="diff-list">
-      <div class="diff-row"><span>Pendências regularizadas</span><strong>${diff.resolved}</strong></div>
-      <div class="diff-row"><span>Novas pendências</span><strong>${diff.newPending}</strong></div>
-      <div class="diff-row"><span>Novas justificativas</span><strong>${diff.newJustified}</strong></div>
-      <div class="diff-row"><span>Novos registros com frequência</span><strong>${diff.newFrequency}</strong></div>
-    </div>
-    ${schoolCount < diff.currentSchools ? `<div class="import-warning">Somente as ${schoolCount} escolas encontradas no HTML serão substituídas. As demais permanecem no banco.</div>` : ""}
-    <div class="transition-head"><div><strong>Antes → depois</strong><span>Todas as situações que o HTML vai gravar, inclusive quando nada muda.</span></div><span class="transition-total">${transitions.length} registros</span></div>
-    <div class="transition-table-wrap">
-      <table class="transition-table">
-        <thead><tr><th>Escola</th><th>Data</th><th>Turno</th><th>Situação atual</th><th></th><th>Após importar</th><th>Resultado</th><th>Motivo</th></tr></thead>
-        <tbody>${transitions.map(row => `<tr class="${row.before === row.after ? "same-row" : "changed-row"}">
-          <td><strong>${escapeHtml(row.schoolName)}</strong></td>
-          <td>${String(row.day).padStart(2,"0")}/${parsed.month.slice(5,7)}</td>
-          <td>${escapeHtml(SHIFT_LABELS[row.shift] || row.shift)}</td>
-          <td>${statusBadgeHtml(row.before, true)}</td>
-          <td class="transition-arrow">→</td>
-          <td>${statusBadgeHtml(row.after, true)}</td>
-          <td>${changeBadgeHtml(row.before,row.after)}</td>
-          <td class="transition-reason">${escapeHtml(row.reason || "—")}</td>
-        </tr>`).join("")}</tbody>
-      </table>
-    </div>`;
-}
 
-function processFile(file) {
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = async () => {
-    try {
-      const parsed = parseMonitoraHTML(String(reader.result || ""), file.name);
-      const currentRecords = await getMonthRecordsOnce(parsed.month);
-      parsed.currentRecords = currentRecords;
-      state.preview = parsed;
-      renderImportPreview(parsed,currentRecords);
-      $("#applyImport").disabled = false;
-    } catch (error) {
-      console.error(error);
-      state.preview = null;
-      $("#applyImport").disabled = true;
-      showToast(error.message || "Não foi possível ler o HTML do Monitora.");
-    }
-  };
-  reader.readAsText(file,"utf-8");
-}
 
 
 const SAFE_BATCH_SIZE = 5;
@@ -1251,551 +1003,35 @@ async function commitWriteOperationsInChunks(operations, chunkSize = SAFE_BATCH_
   }
 }
 
-async function applyImport() {
-  if (!state.preview || !isAdmin()) return;
 
-  const parsed = state.preview;
-  const schoolEntries = Object.entries(parsed.schoolsMeta);
-  const recordEntries = Object.entries(parsed.records);
 
-  try {
-    /*
-      ETAPA 1
-      Primeiro as escolas precisam existir no Firestore.
 
-      A regra de months/{month}/schools/{schoolId} exige a existência de
-      schools/{schoolId}. Por isso não podemos criar escola e registro mensal
-      no mesmo batch durante a primeira importação.
-    */
-    const schoolOperations = schoolEntries.map(([id, meta]) => batch => {
-      batch.set(
-        doc(db, "schools", id),
-        {
-          ...meta,
-          active: true,
-          shifts: recordShifts(parsed.records[id] || { s: {} }),
-          updatedAt: serverTimestamp(),
-          updatedBy: state.user.uid
-        },
-        { merge: true }
-      );
-    });
 
-    await commitWriteOperationsInChunks(schoolOperations);
 
-    /*
-      ETAPA 2
-      Agora que as escolas existem, gravamos os registros mensais.
 
-      Mantemos os lotes pequenos para respeitar os limites de get/exists
-      avaliados pelas Firestore Security Rules.
-    */
-    const recordOperations = recordEntries.map(([id, record]) => batch => {
-      batch.set(
-        doc(db, "months", parsed.month, "schools", id),
-        {
-          schoolId: id,
-          month: parsed.month,
-          s: record.s || {},
-          r: record.r || {},
-          n: record.n || {},
-          source: "monitora",
-          sourceFile: parsed.fileName,
-          updatedAt: serverTimestamp(),
-          updatedBy: state.user.uid
-        }
-      );
-    });
 
-    await commitWriteOperationsInChunks(recordOperations);
 
-    /*
-      ETAPA 3
-      Metadados do mês e auditoria da importação.
-    */
-    const finalBatch = writeBatch(db);
 
-    finalBatch.set(
-      doc(db, "months", parsed.month),
-      {
-        label: monthLabel(parsed.month),
-        lastMonitoraFile: parsed.fileName,
-        lastSource: "monitora",
-        updatedAt: serverTimestamp(),
-        updatedBy: state.user.uid
-      },
-      { merge: true }
-    );
 
-    const counts = importCounts(parsed.records);
-    const importRef = doc(collection(db, "imports"));
 
-    finalBatch.set(importRef, {
-      type: "monitora",
-      month: parsed.month,
-      fileName: parsed.fileName,
-      schoolCount: recordEntries.length,
-      summary: {
-        sent: counts.G || 0,
-        pending: counts.R || 0,
-        justified: counts.J || 0
-      },
-      createdAt: serverTimestamp(),
-      createdBy: state.user.uid,
-      createdByEmail: state.user.email || ""
-    });
 
-    await finalBatch.commit();
 
-    state.month = parsed.month;
-    subscribeMonthRecords(state.month);
-    clearImport(false);
-    switchView("monitor");
-
-    showToast(`${recordEntries.length} escolas sincronizadas com o Firestore.`);
-  } catch (error) {
-    console.error("Erro ao importar HTML do Monitora:", error);
-
-    const code = error?.code ? ` (${error.code})` : "";
-    showToast(`A importação não pôde ser gravada${code}. Confira o Console do navegador.`);
-  }
-}
-
-function clearImport(resetInput=true) {
-  state.preview = null;
-  $("#applyImport").disabled = true;
-  if (resetInput) $("#monitoraInput").value = "";
-  $("#previewTitle").textContent = "Nenhum arquivo selecionado";
-  $("#importPreview").className = "empty-preview";
-  $("#importPreview").innerHTML = `<div class="preview-icon">HTML</div><strong>Aguardando arquivo</strong><span>O mês, as escolas e as alterações aparecerão aqui.</span>`;
-}
-
-function parseDelimitedLine(line, delimiter) {
-  const out=[]; let current=""; let quoted=false;
-  for (let i=0;i<line.length;i++) {
-    const ch=line[i];
-    if (ch==='"') { if (quoted && line[i+1]==='"') { current+='"'; i++; } else quoted=!quoted; }
-    else if (ch===delimiter && !quoted) { out.push(current); current=""; }
-    else current+=ch;
-  }
-  out.push(current); return out;
-}
-
-function normalizeHeader(value) { return normalizeText(value).replace(/[^a-z0-9]+/g,""); }
-
-function parseDailyCSV(text) {
-  const clean=String(text||"").replace(/^\uFEFF/,"").trim();
-  if (!clean) return [];
-  const lines=clean.split(/\r?\n/).filter(line=>line.trim());
-  const delimiter=(lines[0].match(/;/g)||[]).length >= (lines[0].match(/,/g)||[]).length ? ";" : ",";
-  const rows=lines.map(line=>parseDelimitedLine(line,delimiter));
-  const headers=rows.shift().map(normalizeHeader);
-  return rows.map(cols=>Object.fromEntries(headers.map((h,i)=>[h,String(cols[i]??"").trim()])));
-}
-
-function csvFrequencyStatus(value) {
-  const text=normalizeText(value);
-  if (!text) return "desconhecida";
-  if (text.includes("nao enviada") || text.includes("nao enviado") || text==="nao") return "nao_enviada";
-  if (text.includes("enviada") || text.includes("enviado") || text==="sim") return "enviada";
-  return "desconhecida";
-}
-
-function findSchoolByCSVName(name) {
-  const target=normalizeText(name);
-  if (!target) return null;
-  const entries=Object.entries(state.schools);
-  const exact=entries.find(([,meta])=>normalizeText(meta?.name)===target);
-  if (exact) return {id:exact[0],meta:exact[1],confidence:"exata"};
-  const candidates=entries.filter(([,meta])=>{const n=normalizeText(meta?.name);return n&&(n.includes(target)||target.includes(n));});
-  if (candidates.length===1) return {id:candidates[0][0],meta:candidates[0][1],confidence:"aproximada"};
-  return null;
-}
-
-
-function calculateExpectedRosterChanges(shift, mappedRows, existingRecords = {}) {
-  const rosterIds = new Set(mappedRows.filter(row => row.id).map(row => row.id));
-  let added = 0;
-  let removed = 0;
-  let previouslyKnown = 0;
-
-  Object.entries(state.schools).forEach(([schoolId, meta]) => {
-    if (meta?.active === false) return;
-    const roster = normalizeExpectedShiftRoster(meta?.expectedShiftRoster);
-    const hasExplicitFlag = hasExpectedRosterV2(meta) && typeof roster[shift] === "boolean";
-    const before = hasExplicitFlag ? roster[shift] : expectedShiftSeed(schoolId, existingRecords[schoolId]).includes(shift);
-    const after = rosterIds.has(schoolId);
-    if (hasExplicitFlag) previouslyKnown += 1;
-    if (!before && after) added += 1;
-    if (before && !after) removed += 1;
-  });
-
-  return { rosterIds:[...rosterIds], added, removed, previouslyKnown };
-}
-
-function inferLikelyShiftFromHistory(mappedRows, historicalRecords = {}) {
-  const matched = mappedRows.filter(row => row.id && historicalRecords[row.id]);
-  const considered = matched.filter(row => recordShifts(historicalRecords[row.id]).length);
-  const scores = Object.fromEntries(SHIFT_ORDER.map(shift => [shift, 0]));
-
-  considered.forEach(row => {
-    const shifts = recordShifts(historicalRecords[row.id]);
-    shifts.forEach(shift => { if (shift in scores) scores[shift] += 1; });
-  });
-
-  const ranking = SHIFT_ORDER
-    .map(shift => ({ shift, score:scores[shift] || 0 }))
-    .sort((a,b) => b.score - a.score || SHIFT_ORDER.indexOf(a.shift) - SHIFT_ORDER.indexOf(b.shift));
-
-  const best = ranking[0] || { shift:null, score:0 };
-  const second = ranking[1] || { shift:null, score:0 };
-  const total = considered.length;
-  const ratio = total ? best.score / total : 0;
-  const margin = total ? (best.score - second.score) / total : 0;
-  const highConfidence = total >= 5 && ratio >= 0.75 && (best.score - second.score) >= 3 && margin >= 0.15;
-
-  return { shift:best.shift, score:best.score, secondScore:second.score, total, ratio, margin, highConfidence, scores };
-}
-
-async function buildDailyPreview(fileName, rows) {
-  const date = $("#dailyDate").value;
-  let shift = $("#dailyShift").value;
-  const selectedShift = shift;
-  if (!date) throw new Error("Selecione a data antes do CSV.");
-
-  const month = date.slice(0,7);
-  const day = Number(date.slice(-2));
-  const existingRecords = await getMonthRecordsOnce(month);
-
-  const baseMapped = rows.map(row => {
-    const schoolName = row.escola || row.nomeescola || row.unidade || row.unidadeescolar || "";
-    const director = row.diretor || row.diretorada || row.gestor || "";
-    const area = row.gerencia || row.gre || row.polo || "";
-    const frequency = csvFrequencyStatus(row.frequencia || row.status || row.situacao || "");
-    const match = findSchoolByCSVName(schoolName);
-    return {
-      schoolName, director, area, frequency,
-      turmas:row.turmas || row.qtdturmas || row.quantidadeturmas || "",
-      alunos:row.alunos || row.qtdalunos || row.quantidadealunos || "",
-      id:match?.id || null,
-      meta:match?.meta || null,
-      matchConfidence:match?.confidence || "nao_reconhecida"
-    };
-  }).filter(row => row.schoolName);
-
-  // Proteção contra seleção acidental do turno errado: comparamos a composição
-  // do arquivo com o mês anterior do Monitora. Só corrigimos automaticamente
-  // quando a evidência é forte; o CSV continua sendo a fonte de verdade final.
-  let previousRecords = {};
-  try { previousRecords = await getMonthRecordsOnce(previousMonthKey(month)); } catch (_) {}
-  const inference = inferLikelyShiftFromHistory(baseMapped, previousRecords);
-  let autoCorrectedShift = false;
-
-  if (inference.highConfidence && inference.shift && inference.shift !== selectedShift) {
-    shift = inference.shift;
-    autoCorrectedShift = true;
-    const select = $("#dailyShift");
-    select.value = shift;
-    syncCustomSelect(select);
-  }
-
-  const mapped = baseMapped.map(row => {
-    const beforeChar = row.id ? statusChar(existingRecords[row.id], shift, day) : "?";
-    const afterChar = row.frequency === "enviada" ? "G" : row.frequency === "nao_enviada" ? "R" : "?";
-    return { ...row, beforeChar, afterChar };
-  });
-
-  const summary = {
-    total:mapped.length,
-    sent:mapped.filter(r => r.frequency === "enviada").length,
-    pending:mapped.filter(r => r.frequency === "nao_enviada").length,
-    unknownStatus:mapped.filter(r => r.frequency === "desconhecida").length,
-    unknownSchools:mapped.filter(r => !r.id).length,
-    changed:mapped.filter(r => r.id && r.afterChar !== "?" && r.beforeChar !== r.afterChar).length,
-    same:mapped.filter(r => r.id && r.afterChar !== "?" && r.beforeChar === r.afterChar).length
-  };
-
-  const roster = calculateExpectedRosterChanges(shift, mapped, existingRecords);
-  return { fileName,date,shift,selectedShift,autoCorrectedShift,inference,month,rows:mapped,summary,existingRecords,roster };
-}
-
-function renderDailyPreview(parsed) {
-  const {summary}=parsed;
-  $("#dailyPreviewTitle").textContent=`${parsed.fileName} · ${formatDateBR(parsed.date)} · ${SHIFT_LABELS[parsed.shift]}`;
-  $("#dailyPreview").className="";
-  const shiftDetectionNotice = parsed.autoCorrectedShift
-    ? `<div class="import-warning compact-warning"><strong>Turno corrigido automaticamente.</strong> O arquivo foi selecionado como ${SHIFT_LABELS[parsed.selectedShift]}, mas ${parsed.inference.score}/${parsed.inference.total} escolas são compatíveis com ${SHIFT_LABELS[parsed.shift]} no histórico anterior. Para evitar uma grade incorreta, o MFS mudou o turno para <b>${SHIFT_LABELS[parsed.shift]}</b>.</div>`
-    : (parsed.inference?.highConfidence
-      ? `<div class="expected-roster-preview"><strong>Turno validado · ${SHIFT_LABELS[parsed.shift]}</strong><span>${parsed.inference.score}/${parsed.inference.total} escolas compatíveis com este turno no histórico anterior.</span><small>O CSV continua sendo a fonte de verdade da grade atual.</small></div>`
-      : "");
-  $("#dailyPreview").innerHTML=`
-    ${shiftDetectionNotice}
-    <div class="preview-grid">
-      <div class="preview-stat"><strong>${summary.total}</strong><span>escolas no CSV</span></div>
-      <div class="preview-stat"><strong>${summary.sent}</strong><span>com frequência</span></div>
-      <div class="preview-stat"><strong>${summary.changed}</strong><span>situações que mudam</span></div>
-      <div class="preview-stat"><strong>${summary.same}</strong><span>situações mantidas</span></div>
-    </div>
-    ${summary.unknownStatus?`<div class="import-warning compact-warning">${summary.unknownStatus} registro(s) têm situação não reconhecida e serão ignorados.</div>`:""}
-    ${summary.unknownSchools?`<div class="import-warning compact-warning">${summary.unknownSchools} escola(s) não existem no cadastro protegido. Importe primeiro o HTML do Monitora como administrador.</div>`:""}
-    <div class="expected-roster-preview"><strong>Turno esperado · ${SHIFT_LABELS[parsed.shift]}</strong><span>${parsed.roster?.rosterIds?.length || 0} escola(s) reconhecidas neste CSV · <b>+${parsed.roster?.added || 0}</b> entram · <b>-${parsed.roster?.removed || 0}</b> deixam de esperar este turno</span><small>Ao confirmar, este CSV calibra somente o turno ${SHIFT_LABELS[parsed.shift]}. Os outros turnos permanecem independentes e não são sobrescritos.</small></div>
-    <div class="transition-head compact-transition-head"><div><strong>Situação atual → situação após importar</strong><span>Mesmo quando o CSV mantém o mesmo status, a comparação aparece abaixo.</span></div></div>
-    <div class="csv-table-wrap transition-table-wrap daily-transition-wrap">
-      <table class="csv-table transition-table">
-        <thead><tr><th>Escola</th><th>Atual</th><th></th><th>Após importar</th><th>Resultado</th><th>Gerência</th><th>Turmas</th><th>Alunos</th></tr></thead>
-        <tbody>${parsed.rows.map(row=>`<tr class="${row.beforeChar===row.afterChar?"same-row":"changed-row"}">
-          <td><strong>${escapeHtml(row.schoolName)}</strong>${!row.id?`<br><small class="muted">não reconhecida</small>`:""}</td>
-          <td>${row.id?statusBadgeHtml(row.beforeChar,true):'<span class="transition-status blank compact">Não cadastrada</span>'}</td>
-          <td class="transition-arrow">→</td>
-          <td>${row.afterChar!=="?"?statusBadgeHtml(row.afterChar,true):'<span class="transition-status blank compact">Revisar</span>'}</td>
-          <td>${row.id&&row.afterChar!=="?"?changeBadgeHtml(row.beforeChar,row.afterChar):'<span class="transition-change same">Ignora</span>'}</td>
-          <td>${escapeHtml(row.area)}</td><td>${escapeHtml(row.turmas)}</td><td>${escapeHtml(row.alunos)}</td>
-        </tr>`).join("")}</tbody>
-      </table>
-    </div>`;
-}
-
-function processDailyFile(file) {
-  if (!file) return;
-  const reader=new FileReader();
-  reader.onload=async()=>{
-    try {
-      const rows=parseDailyCSV(String(reader.result||""));
-      if (!rows.length) throw new Error("O CSV está vazio ou não pôde ser interpretado.");
-      const parsed=await buildDailyPreview(file.name,rows);
-      state.dailyPreview=parsed;
-      renderDailyPreview(parsed);
-      $("#applyDaily").disabled=!parsed.rows.some(r=>r.id&&r.frequency!=="desconhecida");
-    } catch(error) {
-      console.error(error); state.dailyPreview=null; $("#applyDaily").disabled=true; showToast(error.message||"Não foi possível ler o CSV.");
-    }
-  };
-  reader.readAsText(file,"utf-8");
-}
-
-async function applyDailyCSV() {
-  if (!state.dailyPreview) return;
-
-  const parsed = state.dailyPreview;
-
-  if ($("#dailyDate").value !== parsed.date || $("#dailyShift").value !== parsed.shift) {
-    showToast("A data ou turno mudou. Selecione novamente o CSV.");
-    return;
-  }
-
-  try {
-    const day = Number(parsed.date.slice(-2));
-    const appliedRows = [];
-    const recordOperations = [];
-
-    // Grade esperada v2: cada CSV calibra SOMENTE o turno selecionado.
-    // A ausência/presença nos outros turnos não é inferida nem sobrescrita.
-    // A primeira importação v2 também deixa de usar expectedShifts legado,
-    // eliminando configurações contaminadas por versões anteriores.
-    const rosterIds = new Set((parsed.roster?.rosterIds || parsed.rows.filter(row => row.id).map(row => row.id)));
-    const schoolRosterOperations = [];
-    const localRosterUpdates = [];
-
-    Object.entries(state.schools).forEach(([schoolId, meta]) => {
-      if (meta?.active === false) return;
-
-      const currentRoster = hasExpectedRosterV2(meta)
-        ? normalizeExpectedShiftRoster(meta.expectedShiftRoster)
-        : {};
-      const nextRoster = { ...currentRoster, [parsed.shift]: rosterIds.has(schoolId) };
-      const nextExpected = SHIFT_ORDER.filter(shift => nextRoster[shift] === true);
-
-      const changed = !hasExpectedRosterV2(meta)
-        || JSON.stringify(currentRoster) !== JSON.stringify(nextRoster)
-        || JSON.stringify(normalizeShiftList(meta?.expectedShifts)) !== JSON.stringify(nextExpected);
-
-      if (!changed) return;
-
-      schoolRosterOperations.push(batch => {
-        batch.set(doc(db,"schools",schoolId), {
-          expectedShiftRoster: nextRoster,
-          expectedShiftRosterVersion: EXPECTED_ROSTER_VERSION,
-          expectedShiftRosterUpdatedAt: serverTimestamp(),
-          expectedShiftRosterUpdatedBy: state.user.uid,
-          expectedShifts: nextExpected,
-          expectedShiftsUpdatedAt: serverTimestamp(),
-          expectedShiftsUpdatedBy: state.user.uid
-        }, { merge:true });
-      });
-
-      localRosterUpdates.push({ schoolId, nextRoster, nextExpected });
-    });
-
-    if (schoolRosterOperations.length) {
-      await commitWriteOperationsInChunks(schoolRosterOperations);
-      // Atualização otimista local para que o próximo CSV importado imediatamente
-      // já enxergue a calibração anterior, sem depender do atraso do snapshot.
-      localRosterUpdates.forEach(({schoolId,nextRoster,nextExpected}) => {
-        const meta = state.schools[schoolId] || {};
-        state.schools[schoolId] = {
-          ...meta,
-          expectedShiftRoster: nextRoster,
-          expectedShiftRosterVersion: EXPECTED_ROSTER_VERSION,
-          expectedShifts: nextExpected
-        };
-      });
-    }
-
-    parsed.rows.forEach(row => {
-      if (!row.id || row.frequency === "desconhecida") return;
-
-      const current = clone(parsed.existingRecords[row.id] || { s: {} });
-
-      setStatusChar(
-        current,
-        parsed.shift,
-        day,
-        row.frequency === "enviada" ? "G" : "R",
-        parsed.month
-      );
-
-      recordOperations.push(batch => {
-        batch.set(
-          doc(db, "months", parsed.month, "schools", row.id),
-          {
-            schoolId: row.id,
-            month: parsed.month,
-            s: { [parsed.shift]: current.s[parsed.shift] },
-            source: "csv",
-            updatedAt: serverTimestamp(),
-            updatedBy: state.user.uid
-          },
-          { merge: true }
-        );
-      });
-
-      appliedRows.push(row);
-    });
-
-    if (!appliedRows.length) {
-      showToast("Nenhum registro válido foi encontrado para aplicar.");
-      return;
-    }
-
-    /*
-      Os registros são enviados em lotes pequenos para que as Security Rules
-      possam validar as escolas sem ultrapassar o limite de access calls.
-    */
-    await commitWriteOperationsInChunks(recordOperations);
-
-    /*
-      Depois dos registros, gravamos o resumo do mês, a execução diária
-      e o histórico da importação.
-    */
-    const finalBatch = writeBatch(db);
-
-    finalBatch.set(
-      doc(db, "months", parsed.month),
-      {
-        label: monthLabel(parsed.month),
-        lastDailyFile: parsed.fileName,
-        lastSource: "csv",
-        updatedAt: serverTimestamp(),
-        updatedBy: state.user.uid
-      },
-      { merge: true }
-    );
-
-    finalBatch.set(
-      doc(db, "dailyRuns", `${parsed.date}_${parsed.shift}`),
-      {
-        date: parsed.date,
-        month: parsed.month,
-        shift: parsed.shift,
-        fileName: parsed.fileName,
-        schoolIds: appliedRows.map(row => row.id),
-        expectedRosterSchoolIds: [...rosterIds],
-        expectedRosterAuthoritative: true,
-        importedAt: serverTimestamp(),
-        importedBy: state.user.uid,
-        importedByEmail: state.user.email || "",
-        summary: {
-          total: appliedRows.length,
-          sent: appliedRows.filter(row => row.frequency === "enviada").length,
-          pending: appliedRows.filter(row => row.frequency === "nao_enviada").length
-        }
-      },
-      { merge: true }
-    );
-
-    finalBatch.set(
-      doc(collection(db, "imports")),
-      {
-        type: "csv",
-        date: parsed.date,
-        month: parsed.month,
-        shift: parsed.shift,
-        fileName: parsed.fileName,
-        schoolCount: appliedRows.length,
-        summary: {
-          sent: appliedRows.filter(row => row.frequency === "enviada").length,
-          pending: appliedRows.filter(row => row.frequency === "nao_enviada").length
-        },
-        createdAt: serverTimestamp(),
-        createdBy: state.user.uid,
-        createdByEmail: state.user.email || ""
-      }
-    );
-
-    await finalBatch.commit();
-
-    // A grade mudou: reavaliamos a abertura automática do dia usando somente
-    // os turnos esperados v2. Turnos falsos deixam de gerar pendência/cobrança.
-    state.lastAutoPendingDate = null;
-    state.lastAutoPendingSchoolCount = 0;
-    state.month = parsed.month;
-    renderMonitor();
-    if ($("#view-school")?.classList.contains("active")) renderSchoolHistory();
-    subscribeMonthRecords(state.month);
-    clearDaily(false);
-    await ensureTodayPending();
-    await renderCharges(parsed.date);
-
-    showToast(`${appliedRows.length} registros gravados · grade de ${SHIFT_LABELS[parsed.shift]} recalibrada.`);
-    refreshAssistantStatus();
-  } catch (error) {
-    console.error("Erro ao aplicar CSV diário:", error);
-
-    const code = error?.code ? ` (${error.code})` : "";
-    showToast(`Não foi possível aplicar o CSV no Firestore${code}. Confira o Console.`);
-  }
-}
-
-function clearDaily(resetInput=true) {
-  state.dailyPreview=null; $("#applyDaily").disabled=true;
-  if (resetInput) $("#dailyCsvInput").value="";
-  $("#dailyPreviewTitle").textContent="Nenhum arquivo selecionado";
-  $("#dailyPreview").className="empty-preview";
-  $("#dailyPreview").innerHTML=`<div class="preview-icon">CSV</div><strong>Aguardando arquivo</strong><span>As frequências enviadas e pendentes aparecerão aqui.</span>`;
-}
 
 async function buildChargeGroups(date) {
-  if (!date) return {groups:[],importedShifts:[]};
+  if (!date) return {groups:[]};
   const month=date.slice(0,7), day=Number(date.slice(-2));
-  const runSnaps=await Promise.all(SHIFT_ORDER.map(shift=>getDoc(doc(db,"dailyRuns",`${date}_${shift}`))));
-  const runs={};
-  runSnaps.forEach((snap,i)=>{if(snap.exists()) runs[SHIFT_ORDER[i]]=snap.data();});
-  const importedShifts=Object.keys(runs);
   const records=month===state.month?state.records:await getMonthRecordsOnce(month);
   const groups=new Map();
-
   Object.entries(records).forEach(([id,record])=>{
     effectiveShiftsForSchool(id, record).forEach(shift=>{
       if (statusChar(record,shift,day)!=="R") return;
       const meta=state.schools[id]||{};
-      if(!groups.has(id)) groups.set(id,{id,schoolName:meta.name||id,area:meta.area||"",shifts:[],importedShifts:[]});
+      if(!groups.has(id)) groups.set(id,{id,schoolName:meta.name||id,area:meta.area||"",shifts:[]});
       const group=groups.get(id);
       if(!group.shifts.includes(shift)) group.shifts.push(shift);
-      if(runs[shift] && (runs[shift].schoolIds||[]).includes(id) && !group.importedShifts.includes(shift)) group.importedShifts.push(shift);
     });
   });
-
-  return {groups:[...groups.values()].sort((a,b)=>a.schoolName.localeCompare(b.schoolName,"pt-BR")),importedShifts};
+  return {groups:[...groups.values()].sort((a,b)=>a.schoolName.localeCompare(b.schoolName,"pt-BR"))};
 }
 
 function greetingByTime(date = new Date()) {
@@ -1826,39 +1062,7 @@ function copyText(text) {
   const area=document.createElement("textarea"); area.value=text; document.body.appendChild(area); area.select(); document.execCommand("copy"); area.remove(); showToast("Mensagem copiada.");
 }
 
-async function renderCharges(date=$("#dailyDate")?.value) {
-  if (!date || !db || !state.profile) return;
-  try {
-    const {groups,importedShifts}=await buildChargeGroups(date);
-    state.chargeGroups=groups;
-    $("#chargeTitle").textContent=`Pendências de ${formatDateBR(date)}`;
-    $("#chargeSubtitle").textContent=importedShifts.length?`CSV recebido em: ${importedShifts.map(s=>SHIFT_LABELS[s]).join(", ")}. ${groups.length} escola(s) continuam pendentes no dia.`:`${groups.length} escola(s) pendentes pela abertura automática do dia. Você já pode visualizar ou copiar cobranças antes do CSV.`;
-    $("#copyAllCharges").disabled=!groups.length;
 
-    $$('[data-charge-view]').forEach(button=>button.classList.toggle("active",button.dataset.chargeView===state.chargeView));
-    const list=$("#chargeList");
-    list.className=`charge-list charge-view-${state.chargeView}`;
-
-    if (!groups.length) {
-      list.innerHTML=`<div class="empty-preview small-empty"><strong>Sem pendências nos turnos importados</strong><span>Nenhuma escola permanece marcada como não enviada.</span></div>`;
-      return;
-    }
-
-    if (state.chargeView === "list") {
-      list.innerHTML=`<div class="charge-table-wrap"><table class="charge-table"><thead><tr><th>Escola</th><th>Área/GRE</th><th>Turnos pendentes</th><th></th></tr></thead><tbody>${groups.map((group,index)=>`<tr><td><strong>${escapeHtml(group.schoolName)}</strong></td><td>${escapeHtml(group.area||"—")}</td><td><div class="charge-shifts">${group.shifts.map(shift=>`<span class="charge-shift">${SHIFT_LABELS[shift]}</span>`).join("")}</div></td><td><button class="charge-copy" type="button" data-charge-index="${index}">Copiar mensagem</button></td></tr>`).join("")}</tbody></table></div>`;
-    } else {
-      list.innerHTML=groups.map((group,index)=>`<article class="charge-item charge-card-item"><div class="charge-card-icon">!</div><div class="charge-card-copy"><h3>${escapeHtml(group.schoolName)}</h3><p>${escapeHtml(group.area||"")}</p><div class="charge-shifts">${group.shifts.map(shift=>`<span class="charge-shift">${SHIFT_LABELS[shift]}</span>`).join("")}</div></div><button class="charge-copy" type="button" data-charge-index="${index}">Copiar mensagem</button></article>`).join("");
-    }
-
-    $$('[data-charge-index]').forEach(button=>button.addEventListener('click',()=>{const group=state.chargeGroups[Number(button.dataset.chargeIndex)];if(group)copyText(chargeMessage(group,date));}));
-  } catch(error) { console.error(error); }
-}
-
-function copyAllCharges() {
-  const date=$("#dailyDate").value;
-  if(!date||!state.chargeGroups.length)return;
-  copyText(state.chargeGroups.map(group=>chargeMessage(group,date)).join("\n\n--------------------\n\n"));
-}
 
 
 
@@ -1874,122 +1078,9 @@ function formatClock(date = new Date()) { return `${pad2(date.getHours())}:${pad
 function formatLongDate(date = new Date()) { return new Intl.DateTimeFormat("pt-BR",{weekday:"long",day:"2-digit",month:"long",year:"numeric"}).format(date); }
 
 
-function previousMonthKey(month) {
-  const [year, mo] = month.split("-").map(Number);
-  const date = new Date(year, mo - 2, 1);
-  return `${date.getFullYear()}-${String(date.getMonth()+1).padStart(2,"0")}`;
-}
 
-async function getMonthRecordsFresh(month) {
-  const snapshot = await getDocs(collection(db,"months",month,"schools"));
-  const records = {};
-  snapshot.forEach(snap => records[snap.id] = snap.data());
-  return records;
-}
 
-function scheduleTodayPendingSync(delay = 250) {
-  if (!state.user || !state.profile || !db) return;
-  if (state.autoPendingDebounce) clearTimeout(state.autoPendingDebounce);
-  state.autoPendingDebounce = setTimeout(() => {
-    state.autoPendingDebounce = null;
-    ensureTodayPending().catch(error => console.error("Falha ao abrir pendências automáticas do dia:", error));
-  }, delay);
-}
 
-async function ensureTodayPending() {
-  if (!state.user || !state.profile || state.autoPendingBusy) return;
-  const today = localISODate();
-  const month = today.slice(0,7);
-  const day = Number(today.slice(-2));
-  const dateObj = new Date(`${today}T12:00:00`);
-  const weekend = [0,6].includes(dateObj.getDay());
-  const currentSchoolCount = Object.keys(state.schools).length;
-  if (state.lastAutoPendingDate === today && state.lastAutoPendingSchoolCount === currentSchoolCount) return;
-
-  state.autoPendingBusy = true;
-  try {
-    if (!Object.keys(state.schools).length) return;
-
-    const currentRecords = await getMonthRecordsFresh(month);
-    let previousRecords = {};
-    const needsPrevious = Object.keys(state.schools).some(id => {
-      const current = currentRecords[id];
-      const meta = state.schools[id] || {};
-      if (Array.isArray(meta.expectedShifts)) return false;
-      const stored = Array.isArray(meta.shifts) ? meta.shifts : [];
-      return !recordShifts(current).length && !stored.length;
-    });
-    if (needsPrevious) previousRecords = await getMonthRecordsFresh(previousMonthKey(month));
-
-    const operations = [];
-    let changedCount = 0;
-    let schoolCount = 0;
-
-    Object.entries(state.schools).forEach(([schoolId, meta]) => {
-      if (meta?.active === false) return;
-      const existed = Boolean(currentRecords[schoolId]);
-      const current = clone(currentRecords[schoolId] || { s:{}, r:{}, n:{} });
-      if (current?.n?.[String(day)]) return;
-
-      let shifts;
-      if (Array.isArray(meta?.expectedShifts)) {
-        shifts = normalizeShiftList(meta.expectedShifts);
-      } else {
-        shifts = recordShifts(current);
-        if (!shifts.length && Array.isArray(meta?.shifts)) shifts = meta.shifts.filter(shift => SHIFT_ORDER.includes(shift));
-        if (!shifts.length) shifts = recordShifts(previousRecords[schoolId]);
-      }
-      if (!shifts.length) return;
-
-      // Sem um calendário mensal já criado, não presumimos sábado/domingo.
-      // Se o Monitora já trouxe o mês, os X de não-letivo são respeitados normalmente.
-      if (!existed && weekend) return;
-
-      let changed = false;
-      shifts.forEach(shift => {
-        const currentStatus = statusChar(current, shift, day);
-        if (currentStatus !== ".") return;
-        setStatusChar(current, shift, day, "R", month);
-        changed = true;
-        changedCount += 1;
-      });
-
-      if (!changed) return;
-      schoolCount += 1;
-      operations.push(batch => batch.set(doc(db,"months",month,"schools",schoolId),{
-        schoolId,
-        month,
-        s:current.s || {},
-        source:"auto_day_open",
-        autoPendingDate:today,
-        updatedAt:serverTimestamp(),
-        updatedBy:state.user.uid
-      },{merge:true}));
-    });
-
-    if (operations.length) {
-      await commitWriteOperationsInChunks(operations);
-      await setDoc(doc(db,"months",month),{
-        label:monthLabel(month),
-        lastSource:"auto_day_open",
-        lastAutoPendingDate:today,
-        updatedAt:serverTimestamp(),
-        updatedBy:state.user.uid
-      },{merge:true});
-
-      const noticeKey=`mfs-auto-pending:${today}`;
-      if (!sessionStorage.getItem(noticeKey)) {
-        sessionStorage.setItem(noticeKey,"1");
-        showToast(`Dia aberto: ${changedCount} turno(s) de ${schoolCount} escola(s) marcados como pendentes.`);
-      }
-    }
-
-    state.lastAutoPendingDate = today;
-    state.lastAutoPendingSchoolCount = currentSchoolCount;
-  } finally {
-    state.autoPendingBusy = false;
-  }
-}
 
 function startAssistantEngine() {
   if (!state.user || !state.profile) return;
@@ -2002,11 +1093,6 @@ function startAssistantEngine() {
   state.assistantRefreshTimer = setInterval(refreshAssistantStatus,5*60*1000);
   checkScheduledAlerts();
   state.alertTimer = setInterval(checkScheduledAlerts,30*1000);
-  scheduleTodayPendingSync(500);
-  state.dayWatchTimer = setInterval(() => {
-    const today = localISODate();
-    if (state.lastAutoPendingDate !== today) scheduleTodayPendingSync(100);
-  }, 60*1000);
   if ($("#taskDateInput") && !$("#taskDateInput").value) $("#taskDateInput").value = localISODate();
   if ($("#eventDateInput") && !$("#eventDateInput").value) $("#eventDateInput").value = localISODate();
 }
@@ -2099,12 +1185,29 @@ function renderWaterStatus(){if(!$("#waterStatusText"))return;const info=waterDu
 async function registerWater(){await saveAssistantSetting({lastWaterAt:new Date().toISOString(),waterIntervalMinutes:Number($("#waterIntervalSelect").value||90)});showToast("Água registrada. Próximo lembrete programado.");}
 
 function sessionAlertKey(key,time,date=localISODate()){return `mfs-alert:${date}:${key}:${time}`;}
-function checkScheduledAlerts(){if(!state.user||!state.profile)return;const now=new Date();const hm=`${pad2(now.getHours())}:${pad2(now.getMinutes())}`;for(const item of workRoutineFor(now)){if(hm!==item.time)continue;const key=sessionAlertKey(item.key,item.time);if(sessionStorage.getItem(key))continue;sessionStorage.setItem(key,"1");notifyUser(`MFS · ${item.title}`,item.detail);}const water=waterDueInfo();if(water.due){const bucket=Math.floor(Date.now()/(30*60*1000));const key=`mfs-water:${bucket}`;if(!sessionStorage.getItem(key)){sessionStorage.setItem(key,"1");notifyUser("MFS · Hora da água","Reserve um minuto para beber água e depois registre no Assistente.");}}checkTaskAlerts();}
+function checkScheduledAlerts(){if(!state.user||!state.profile)return;const now=new Date();const hm=`${pad2(now.getHours())}:${pad2(now.getMinutes())}`;for(const slot of [{time:"08:00",label:"Sincronize o Monitora para iniciar o dia"},{time:"12:05",label:"Atualize Manhã e Integral no Companion"},{time:"15:35",label:"Atualize o turno da Tarde no Companion"}]){if(hm===slot.time){const k=sessionAlertKey(`sync-${slot.time}`,slot.time);if(!sessionStorage.getItem(k)){sessionStorage.setItem(k,"1");notifyUser("MFS · Companion",slot.label);}}}for(const item of workRoutineFor(now)){if(hm!==item.time)continue;const key=sessionAlertKey(item.key,item.time);if(sessionStorage.getItem(key))continue;sessionStorage.setItem(key,"1");notifyUser(`MFS · ${item.title}`,item.detail);}const water=waterDueInfo();if(water.due){const bucket=Math.floor(Date.now()/(30*60*1000));const key=`mfs-water:${bucket}`;if(!sessionStorage.getItem(key)){sessionStorage.setItem(key,"1");notifyUser("MFS · Hora da água","Reserve um minuto para beber água e depois registre no Assistente.");}}checkTaskAlerts();}
 function checkTaskAlerts(){const now=new Date();const today=localISODate();const hm=`${pad2(now.getHours())}:${pad2(now.getMinutes())}`;Object.values(state.tasks).forEach(task=>{if(task.done||task.dueDate!==today||!task.dueTime||task.dueTime!==hm)return;const key=sessionAlertKey(`task-${task.id}`,hm);if(sessionStorage.getItem(key))return;sessionStorage.setItem(key,"1");notifyUser("MFS · Tarefa agora",task.title||"Você tem uma tarefa agendada.");});}
 
-async function refreshAssistantStatus(){if(!state.user||!state.profile)return;try{await ensureTodayPending();const today=localISODate();const yesterday=addDaysToDateKey(today,-1);const checks=[{date:yesterday,shift:"noite",label:"Noite de ontem",due:"08:00"},{date:today,shift:"manha",label:"Manhã",due:"12:00"},{date:today,shift:"integral",label:"Integral",due:"12:00"},{date:today,shift:"tarde",label:"Tarde",due:"15:30"}];const snaps=await Promise.all(checks.map(item=>getDoc(doc(db,"dailyRuns",`${item.date}_${item.shift}`))));const now=minutesOfDay();const results=checks.map((item,i)=>({...item,done:snaps[i].exists(),overdue:!snaps[i].exists()&&now>=hhmmToMinutes(item.due)}));state.assistantOps=results;renderAssistantChecklist();await renderCalendarAlerts();updateAssistantNextAction();}catch(error){console.error("Falha ao atualizar Assistente:",error);}}
-function renderAssistantChecklist(){if(!$("#assistantChecklist"))return;const items=state.assistantOps||[];$("#assistantChecklist").innerHTML=items.map(item=>{const cls=item.done?"done":item.overdue?"pending":"wait";const icon=item.done?"✓":item.overdue?"!":"◷";const text=item.done?"Importado":item.overdue?"Atrasado":"Aguardando horário";return `<div class="assistant-check-item"><span class="assistant-check-icon ${cls}">${icon}</span><div class="assistant-check-copy"><strong>${item.label}</strong><small>${item.date===localISODate()?"Hoje":formatDateBR(item.date)} · conferir até ${item.due}</small></div><span class="assistant-check-badge">${text}</span></div>`}).join("");}
-function updateAssistantNextAction(){const now=minutesOfDay();const overdue=(state.assistantOps||[]).filter(i=>i.overdue&&!i.done);let title="Rotina em dia";let sub="Continue usando o MFS para registrar as próximas atualizações.";if(overdue.length){title=`${overdue.length} atualização(ões) atrasada(s)`;sub=`Prioridade: ${overdue.map(x=>x.label).join(", ")}. Abra CSV diário e atualize quando possível.`;}else{const nextOps=(state.assistantOps||[]).filter(i=>!i.done&&hhmmToMinutes(i.due)>now).sort((a,b)=>hhmmToMinutes(a.due)-hhmmToMinutes(b.due));const nextRoutine=workRoutineFor().filter(i=>hhmmToMinutes(i.time)>now).sort((a,b)=>hhmmToMinutes(a.time)-hhmmToMinutes(b.time))[0];const nextOp=nextOps[0];if(nextOp&&(!nextRoutine||hhmmToMinutes(nextOp.due)<=hhmmToMinutes(nextRoutine.time))){title=`${nextOp.label} · até ${nextOp.due}`;sub="O Assistente vai sinalizar se esse turno continuar sem importação depois do horário.";}else if(nextRoutine){title=`${nextRoutine.time} · ${nextRoutine.title}`;sub=nextRoutine.detail;}}if($("#assistantNextAction"))$("#assistantNextAction").innerHTML=`<span>Próxima ação</span><strong>${escapeHtml(title)}</strong>`;if($("#assistantNextText"))$("#assistantNextText").textContent=sub;if($("#assistantTopText"))$("#assistantTopText").textContent=overdue.length?`${overdue.length} pendência(s) de rotina`:"Assistente";if($("#assistantTopSub"))$("#assistantTopSub").textContent=overdue.length?overdue.map(x=>x.label).join(" · "):title;}
+async function refreshAssistantStatus(){
+  if(!state.user||!state.profile)return;
+  try{
+    const today=localISODate();
+    const yesterday=addDaysToDateKey(today,-1);
+    const [todayRecords,yesterdayRecords]=await Promise.all([getMonthRecordsOnce(today.slice(0,7)),getMonthRecordsOnce(yesterday.slice(0,7))]);
+    const shiftPending=(records,date,shift)=>{const day=Number(date.slice(-2));let count=0;Object.entries(records).forEach(([id,record])=>{if(effectiveShiftsForSchool(id,record).includes(shift)&&statusChar(record,shift,day)==="R")count++;});return count;};
+    const latest=latestSyncRun();const latestMs=syncRunMillis(latest);const ageMinutes=latestMs?Math.max(0,Math.floor((Date.now()-latestMs)/60000)):null;const syncedToday=!!latest&&String(latest.rangeEnd||latest.date||"")>=today;const now=minutesOfDay();
+    const checks=[
+      {kind:"sync",label:"Sincronização Monitora",due:"08:00",done:syncedToday&&ageMinutes!==null&&ageMinutes<=180,overdue:!syncedToday||ageMinutes===null||ageMinutes>180,detail:latestMs?`Última sincronização há ${ageMinutes} min`:"Nenhuma sincronização registrada"},
+      {kind:"shift",date:yesterday,shift:"noite",label:"Noite de ontem",due:"08:00",pending:shiftPending(yesterdayRecords,yesterday,"noite")},
+      {kind:"shift",date:today,shift:"manha",label:"Manhã",due:"12:00",pending:shiftPending(todayRecords,today,"manha")},
+      {kind:"shift",date:today,shift:"integral",label:"Integral",due:"12:00",pending:shiftPending(todayRecords,today,"integral")},
+      {kind:"shift",date:today,shift:"tarde",label:"Tarde",due:"15:30",pending:shiftPending(todayRecords,today,"tarde")}
+    ].map(item=>item.kind==="sync"?item:{...item,done:item.pending===0,overdue:item.pending>0&&now>=hhmmToMinutes(item.due),detail:item.pending?`${item.pending} escola(s) pendente(s)`:"Sem pendências"});
+    state.assistantOps=checks;renderAssistantChecklist();await renderCalendarAlerts();updateAssistantNextAction();
+  }catch(error){console.error("Falha ao atualizar Assistente:",error);}
+}
+function renderAssistantChecklist(){if(!$("#assistantChecklist"))return;const items=state.assistantOps||[];$("#assistantChecklist").innerHTML=items.map(item=>{const cls=item.done?"done":item.overdue?"pending":"wait";const icon=item.done?"✓":item.overdue?"!":"◷";const text=item.kind==="sync"?(item.done?"Atualizado":"Sincronizar"):(item.pending?`${item.pending} pend.`:"Concluído");const sub=item.kind==="sync"?item.detail:`${item.date===localISODate()?"Hoje":formatDateBR(item.date)} · ${item.detail} · referência ${item.due}`;return `<div class="assistant-check-item"><span class="assistant-check-icon ${cls}">${icon}</span><div class="assistant-check-copy"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(sub)}</small></div><span class="assistant-check-badge">${escapeHtml(text)}</span></div>`}).join("");}
+function updateAssistantNextAction(){const now=minutesOfDay();const items=state.assistantOps||[];const sync=items.find(i=>i.kind==="sync");const overdue=items.filter(i=>i.kind==="shift"&&i.overdue&&i.pending>0);let title="Rotina em dia",sub="O Companion está atualizado e não há cobrança vencida agora.";if(sync?.overdue){title="Sincronizar o Monitora";sub="O Assistente precisa de uma sincronização recente para trabalhar com a situação real das escolas.";}else if(overdue.length){const total=overdue.reduce((sum,item)=>sum+(item.pending||0),0);title=`${total} pendência(s) para cobrança`;sub=`Prioridade: ${overdue.map(x=>`${x.label} (${x.pending})`).join(" · ")}. Abra a Central operacional.`;}else{const nextRoutine=workRoutineFor().filter(i=>hhmmToMinutes(i.time)>now).sort((a,b)=>hhmmToMinutes(a.time)-hhmmToMinutes(b.time))[0];if(nextRoutine){title=`${nextRoutine.time} · ${nextRoutine.title}`;sub=nextRoutine.detail;}}if($("#assistantNextAction"))$("#assistantNextAction").innerHTML=`<span>Próxima ação</span><strong>${escapeHtml(title)}</strong>`;if($("#assistantNextText"))$("#assistantNextText").textContent=sub;if($("#assistantTopText"))$("#assistantTopText").textContent=sync?.overdue?"Sincronizar Monitora":overdue.length?`${overdue.reduce((s,x)=>s+(x.pending||0),0)} pendência(s)`:"Assistente";if($("#assistantTopSub"))$("#assistantTopSub").textContent=title;}
 
 function subscribeAssistantEvents(){if(typeof state.unsubAssistantEvents==="function")state.unsubAssistantEvents();state.unsubAssistantEvents=onSnapshot(collection(db,"assistantEvents"),snapshot=>{const events={};snapshot.forEach(s=>events[s.id]={id:s.id,...s.data()});state.assistantEvents=events;renderCalendarAlerts();},error=>console.error("Falha ao carregar eventos:",error));}
 async function addAssistantEvent(){if(!isAdmin())return;const title=$("#eventTitleInput")?.value.trim(),date=$("#eventDateInput")?.value,time=$("#eventTimeInput")?.value||"";if(!title||!date){showToast("Informe título e data do evento.");return;}await addDoc(collection(db,"assistantEvents"),{title,date,time,active:true,createdAt:serverTimestamp(),createdBy:state.user.uid,updatedAt:serverTimestamp(),updatedBy:state.user.uid});$("#eventTitleInput").value="";showToast("Evento compartilhado adicionado.");}
@@ -2169,6 +1272,23 @@ async function applyBulkStatus(){
     showToast(`Alteração em massa aplicada em ${selectedItems.length} registro(s).`);
   }catch(error){console.error(error);showToast("Não foi possível aplicar a alteração em massa.");}
 }
+
+function syncRunChangeRows(){const rows=[];for(const run of state.syncRuns||[]){for(const change of Array.isArray(run.changes)?run.changes:[])rows.push({...change,_run:run,_time:syncRunMillis(run)});}return rows.sort((a,b)=>b._time-a._time||String(b.date).localeCompare(String(a.date)));}
+async function opsDataForDate(date){const month=date.slice(0,7),day=Number(date.slice(-2));const records=month===state.month?state.records:await getMonthRecordsOnce(month);const statusGroups={R:new Map(),G:new Map(),J:new Map()};const isToday=date===localISODate();Object.entries(records).forEach(([id,record])=>{const meta=state.schools[id]||{};const baseShifts=isToday?effectiveShiftsForSchool(id,record):recordShifts(record);const shifts=baseShifts.filter(shift=>state.opsShift==="TODOS"||shift===state.opsShift);for(const shift of shifts){const ch=statusChar(record,shift,day);if(!statusGroups[ch])continue;if(!statusGroups[ch].has(id))statusGroups[ch].set(id,{id,schoolName:meta.name||id,area:meta.area||"",shifts:[]});statusGroups[ch].get(id).shifts.push(shift);}});const sortMap=map=>[...map.values()].sort((a,b)=>a.schoolName.localeCompare(b.schoolName,"pt-BR"));return{records,pending:sortMap(statusGroups.R),done:sortMap(statusGroups.G),justified:sortMap(statusGroups.J)};}
+function renderKanbanCards(groups,status,date){if(!groups.length)return `<div class="kanban-empty">Nenhuma escola nesta coluna.</div>`;return groups.map(group=>`<article class="kanban-card ${status}"><div class="kanban-card-main"><strong>${escapeHtml(group.schoolName)}</strong><small>${escapeHtml(group.area||"")}</small><div class="charge-shifts">${group.shifts.map(shift=>`<span class="charge-shift">${escapeHtml(SHIFT_LABELS[shift])}</span>`).join("")}</div></div><div class="kanban-card-actions">${status==="pending"?`<button class="mini-button approve" type="button" data-ops-charge-school="${escapeHtml(group.id)}">Cobrar</button>`:""}<button class="mini-button" type="button" data-school-profile="${escapeHtml(group.id)}">Perfil</button></div></article>`).join("");}
+function renderOpsCharges(groups,date){state.opsChargeGroups=groups;if($("#opsChargeTitle"))$("#opsChargeTitle").textContent=`Cobranças de ${formatDateBR(date)}`;if($("#opsChargeSubtitle"))$("#opsChargeSubtitle").textContent=groups.length?`${groups.length} escola(s) com pendência na situação atual do Companion.`:"Nenhuma escola pendente nesta data/filtro.";if($("#copyAllOpsCharges"))$("#copyAllOpsCharges").disabled=!groups.length;$$('[data-ops-charge-view]').forEach(button=>button.classList.toggle("active",button.dataset.opsChargeView===state.opsChargeView));const list=$("#opsChargeList");if(!list)return;list.className=`charge-list charge-view-${state.opsChargeView}`;if(!groups.length){list.innerHTML=`<div class="empty-preview small-empty"><strong>Sem cobranças</strong><span>Tudo regularizado para este filtro.</span></div>`;return;}if(state.opsChargeView==="list")list.innerHTML=`<div class="charge-table-wrap"><table class="charge-table"><thead><tr><th>Escola</th><th>Área/GRE</th><th>Turnos</th><th></th></tr></thead><tbody>${groups.map((group,index)=>`<tr><td><strong>${escapeHtml(group.schoolName)}</strong></td><td>${escapeHtml(group.area||"—")}</td><td><div class="charge-shifts">${group.shifts.map(shift=>`<span class="charge-shift">${escapeHtml(SHIFT_LABELS[shift])}</span>`).join("")}</div></td><td><button class="charge-copy" type="button" data-ops-charge-index="${index}">Copiar mensagem</button></td></tr>`).join("")}</tbody></table></div>`;else list.innerHTML=groups.map((group,index)=>`<article class="charge-item charge-card-item"><div class="charge-card-icon">!</div><div class="charge-card-copy"><h3>${escapeHtml(group.schoolName)}</h3><p>${escapeHtml(group.area||"")}</p><div class="charge-shifts">${group.shifts.map(shift=>`<span class="charge-shift">${escapeHtml(SHIFT_LABELS[shift])}</span>`).join("")}</div></div><button class="charge-copy" type="button" data-ops-charge-index="${index}">Copiar mensagem</button></article>`).join("");}
+function renderOpsLogs(date){
+  const all=syncRunChangeRows().filter(change=>change.date===date&&(state.opsShift==="TODOS"||change.shift===state.opsShift));
+  if($("#syncLogCount"))$("#syncLogCount").textContent=String(all.length);
+  const list=$("#syncLogList");if(!list)return;
+  if(!all.length){list.innerHTML=`<div class="assistant-loading">Nenhuma mudança registrada pelo Companion para esta data/filtro.</div>`;return;}
+  const row=change=>`<div class="sync-log-item"><span class="sync-log-status ${STATUS_INFO[change.after]?.cls||"blank"}">${STATUS_INFO[change.after]?.short||"•"}</span><div><strong>${escapeHtml(changeLogMessage(change))}</strong><small>${escapeHtml(companionStatusLabel(change.before))} → ${escapeHtml(companionStatusLabel(change.after))}${change.reason?` · ${escapeHtml(change.reason)}`:""}</small></div></div>`;
+  if(state.opsShift!=="TODOS"){list.innerHTML=all.slice(0,300).map(row).join("");return;}
+  const groups=SHIFT_ORDER.map(shift=>({shift,rows:all.filter(change=>change.shift===shift)})).filter(group=>group.rows.length);
+  list.innerHTML=groups.map(group=>`<section class="sync-log-shift-group"><header><strong>${escapeHtml(SHIFT_LABELS[group.shift])}</strong><span>${group.rows.length} alteração(ões)</span></header>${group.rows.slice(0,120).map(row).join("")}</section>`).join("");
+}
+async function renderOpsCenter(){if(!$("#view-ops")||!state.profile)return;const date=$("#opsDate")?.value||state.opsDate||localISODate();state.opsDate=date;state.opsShift=$("#opsShift")?.value||state.opsShift||"TODOS";try{const data=await opsDataForDate(date);$("#opsPendingCount").textContent=String(data.pending.length);$("#opsDoneCount").textContent=String(data.done.length);$("#opsJustifiedCount").textContent=String(data.justified.length);$("#opsPendingList").innerHTML=renderKanbanCards(data.pending,"pending",date);$("#opsDoneList").innerHTML=renderKanbanCards(data.done,"done",date);$("#opsJustifiedList").innerHTML=renderKanbanCards(data.justified,"justified",date);const latest=latestSyncRun(),age=latest?Math.max(0,Math.floor((Date.now()-syncRunMillis(latest))/60000)):null;$("#opsSummary").innerHTML=`<article class="card ops-stat"><span>Pendentes</span><strong>${data.pending.length}</strong></article><article class="card ops-stat"><span>Concluídas</span><strong>${data.done.length}</strong></article><article class="card ops-stat"><span>Justificadas</span><strong>${data.justified.length}</strong></article><article class="card ops-stat"><span>Último sync</span><strong>${age===null?"—":age<1?"agora":`${age}m`}</strong></article>`;renderOpsCharges(data.pending,date);renderOpsLogs(date);}catch(error){console.error("Central operacional:",error);showToast("Não foi possível montar a Central operacional.");}}
+function copyAllOpsCharges(){const date=$("#opsDate")?.value||localISODate();if(!state.opsChargeGroups.length)return;copyText(state.opsChargeGroups.map(group=>chargeMessage(group,date)).join("\n\n--------------------\n\n"));}
 
 function onlyDigits(value){return String(value||"").replace(/\D/g,"");}
 function openWhatsapp(phone){const digits=onlyDigits(phone);if(!digits){showToast("Informe um número de WhatsApp.");return;}window.open(`https://wa.me/${digits}`,"_blank","noopener,noreferrer");}
@@ -2263,7 +1383,7 @@ function renderSchoolHistorySelector() {
 
 function historyShiftsForMonth(schoolId, record, month) {
   const currentMonth = localISODate().slice(0,7);
-  // No mês atual usamos a grade operacional calibrada pelos CSVs.
+  // No mês atual usamos a grade operacional recebida pelo Companion.
   // Meses anteriores preservam exatamente os turnos existentes no histórico.
   return month === currentMonth ? effectiveShiftsForSchool(schoolId, record) : recordShifts(record);
 }
@@ -2327,7 +1447,7 @@ function renderSchoolHistory() {
     const counts = historyStatusCounts(schoolId, record, month);
     const ndays = daysInMonth(month);
     const monthMeta = state.months[month] || {};
-    return `<article class="card school-history-month-card"><header class="history-month-head"><div><p class="eyebrow">${escapeHtml(monthMeta.lastSource === "monitora" ? "Monitora" : "Histórico")}</p><h3>${monthLabel(month)}</h3><span>${shifts.length ? shifts.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Sem turnos esperados"}</span></div><div class="history-month-counts"><span><b>${counts.G}</b> frequência</span><span><b>${counts.R}</b> pendente</span><span><b>${counts.J}</b> justificada</span></div></header><div class="school-calendar history-school-calendar">${shifts.length ? renderHistoryCalendarHalf(schoolId, record, shifts, month, 1, Math.min(15,ndays)) + (ndays > 15 ? renderHistoryCalendarHalf(schoolId, record, shifts, month, 16, ndays) : "") : '<div class="empty-card">Sem turnos esperados.</div>'}</div><div class="history-edit-hint">Clique em um turno para editar · segure e arraste sobre pendências vermelhas para selecionar em massa.</div></article>`;
+    return `<article class="card school-history-month-card"><header class="history-month-head"><div><p class="eyebrow">${escapeHtml(String(monthMeta.lastSource||"").includes("companion") ? "Companion" : "Histórico")}</p><h3>${monthLabel(month)}</h3><span>${shifts.length ? shifts.map(shift => SHIFT_LABELS[shift]).join(" · ") : "Sem turnos esperados"}</span></div><div class="history-month-counts"><span><b>${counts.G}</b> frequência</span><span><b>${counts.R}</b> pendente</span><span><b>${counts.J}</b> justificada</span></div></header><div class="school-calendar history-school-calendar">${shifts.length ? renderHistoryCalendarHalf(schoolId, record, shifts, month, 1, Math.min(15,ndays)) + (ndays > 15 ? renderHistoryCalendarHalf(schoolId, record, shifts, month, 16, ndays) : "") : '<div class="empty-card">Sem turnos esperados.</div>'}</div><div class="history-edit-hint">Clique em um turno para editar · segure e arraste sobre pendências vermelhas para selecionar em massa.</div></article>`;
   }).join("");
 }
 
@@ -2362,7 +1482,7 @@ function openSchoolHistory(schoolId) {
 }
 
 function switchView(view) {
-  if ((view === "import" || view === "users") && !isAdmin()) return;
+  if (view === "users" && !isAdmin()) return;
 
   if ($(".view.active")?.dataset.viewPanel !== view && state.bulkSelection?.size) clearBulkSelection();
   closeCustomSelects();
@@ -2382,7 +1502,7 @@ function switchView(view) {
   $$(".nav-button").forEach(btn => btn.classList.toggle("active", btn.dataset.view === view));
   $$(".view").forEach(panel => panel.classList.toggle("active", panel === next));
 
-  const labels = { monitor:"Acompanhamento", school:"Escola", daily:"CSV diário", assistant:"Assistente", import:"Monitora", users:"Usuários" };
+  const labels = { monitor:"Acompanhamento", ops:"Operação & logs", school:"Escola", assistant:"Assistente", users:"Usuários" };
   setMonitorPerformanceMode(view === "monitor");
   $("#workspaceTitle").textContent = labels[view] || "MFS";
   $("#sidebar").classList.remove("open");
@@ -2394,203 +1514,157 @@ function switchView(view) {
 
   if (view === "users") loadUserManagement();
   if (view === "assistant") refreshAssistantStatus();
+  if (view === "ops") renderOpsCenter();
   if (view === "school") { renderSchoolHistorySelector(); if (state.schoolHistoryId) loadSchoolHistory(state.schoolHistoryId); }
 }
 
 
-async function runMonitoraSyncTest(){
-  openSyncModal();
-  const result = $("#syncResult");
-  if (result) result.innerHTML = "Abra o Monitora e use o MFS Companion para sincronizar. Nenhum dado é alterado por este botão.";
-}
+function companionStatusLabel(char){return STATUS_INFO[char]?.label||"Desconhecido";}
+function companionStatusFromTurn(turn){return turn?.status&&STATUS_INFO[turn.status]?turn.status:".";}
+function companionShift(code){return SHIFT_CODES[String(code||"").toUpperCase()]||null;}
+function findSchoolByName(name){const n=normalizeText(name);if(!n)return null;return Object.entries(state.schools).map(([id,meta])=>({id,meta})).find(item=>normalizeText(item.meta?.name||"")===n)||null;}
+function safeReason(value){if(!value)return"";if(typeof value==="string")return value;try{return JSON.stringify(value);}catch{return String(value);}}
+function syncRunMillis(run){const value=run?.createdAt||run?.updatedAt;if(value?.toMillis)return value.toMillis();if(value?.seconds)return value.seconds*1000;if(typeof value==="string"){const t=Date.parse(value);return Number.isFinite(t)?t:0;}return 0;}
+function latestSyncRun(){return (state.syncRuns||[]).slice().sort((a,b)=>syncRunMillis(b)-syncRunMillis(a))[0]||null;}
+function changeLogMessage(change){const school=change.schoolName||change.schoolId,shift=SHIFT_LABELS[change.shift]||change.shift,date=formatDateBR(change.date);if(change.after==="G"&&change.before==="R")return `${school} realizou a presença do turno ${shift} - ${date}`;if(change.after==="G")return `${school} registrou a presença do turno ${shift} - ${date}`;if(change.after==="R")return `${school} está pendente no turno ${shift} - ${date}`;if(change.after==="J")return `${school} teve o turno ${shift} justificado - ${date}`;if(change.after==="X")return `${school} foi marcado como não letivo no turno ${shift} - ${date}`;if(change.after===".")return `${school} teve o registro do turno ${shift} removido - ${date}`;return `${school}: ${companionStatusLabel(change.before)} → ${companionStatusLabel(change.after)} · ${shift} · ${date}`;}
+function renderIncomingSyncDetails(changes,payload){const result=$("#syncResult"),preview=$("#companionSyncPreview");if(result)result.innerHTML=`<strong>🟢 ${monthLabel(payload.chunkMonth||payload.rangeEnd?.slice(0,7)||state.month)} sincronizado</strong><br>${changes.length} alteração(ões) aplicada(s) · execução ${escapeHtml(payload.runId||"")}`;if(!preview)return;preview.hidden=false;const rows=changes.slice(-160).reverse();preview.innerHTML=`<div class="sync-preview-head"><strong>${escapeHtml(formatDateBR(payload.rangeStart||payload.days?.[0]?.date||""))} → ${escapeHtml(formatDateBR(payload.rangeEnd||payload.days?.[payload.days.length-1]?.date||""))}</strong><span>${changes.length} alterações neste lote</span></div><div class="sync-detail-list">${rows.length?rows.map(change=>`<div class="sync-detail-row"><div><strong>${escapeHtml(change.schoolName)}</strong><small>${escapeHtml(formatDateBR(change.date))} · ${escapeHtml(SHIFT_LABELS[change.shift]||change.shift)}</small></div><span class="sync-before ${STATUS_INFO[change.before]?.cls||"blank"}">${escapeHtml(companionStatusLabel(change.before))}</span><b>→</b><span class="sync-after ${STATUS_INFO[change.after]?.cls||"blank"}">${escapeHtml(companionStatusLabel(change.after))}</span></div>`).join(""):`<div class="assistant-loading">Nenhuma situação mudou neste lote.</div>`}</div>`;}
+async function subscribeSyncRuns(){if(typeof state.unsubSyncRuns==="function")state.unsubSyncRuns();state.unsubSyncRuns=onSnapshot(collection(db,"syncRuns"),snapshot=>{const runs=[];snapshot.forEach(s=>runs.push({id:s.id,...s.data()}));state.syncRuns=runs.sort((a,b)=>syncRunMillis(b)-syncRunMillis(a));if($("#view-ops")?.classList.contains("active"))renderOpsCenter();refreshAssistantStatus();},error=>console.error("Falha ao carregar logs de sincronização:",error));}
+async function applyCompanionChunk(payload){
+  if(!payload||payload.source!=="monitora"||Number(payload.syncVersion||1)<2)return;
+  if(!state.user||!state.profile?.active){showToast("Entre no MFS antes de receber a sincronização.");return;}
+  const month=String(payload.chunkMonth||payload.days?.[0]?.date||"").slice(0,7);
+  if(!/^\d{4}-\d{2}$/.test(month))throw new Error("Mês inválido recebido do Companion.");
+  openSyncModal();if($("#syncResult"))$("#syncResult").innerHTML=`🔄 Aplicando ${monthLabel(month)}...`;
 
+  const records=await getMonthRecordsOnce(month);
+  const working={};Object.entries(records).forEach(([id,r])=>working[id]=clone(r));
+  const changes=[],touchedSchools=new Set(),schoolOps=[],profileOps=[],ignored=[];
+  const metadataById=new Map((Array.isArray(payload.metadata)?payload.metadata:[]).map(meta=>[String(meta.id),meta]));
 
-
-function companionShiftLabel(code) {
-  return SHIFT_LABELS[SHIFT_CODES[String(code || "").toUpperCase()]] || code || "—";
-}
-
-function companionStatusLabel(char) {
-  return STATUS_INFO[char]?.label || "Desconhecido";
-}
-
-function companionStatusFromTurn(turn) {
-  if (turn?.status && STATUS_INFO[turn.status]) return turn.status;
-  return ".";
-}
-
-async function receiveCompanionSync(payload) {
-  if (!payload || payload.source !== "monitora") return;
-  if (!state.user || !state.profile?.active) {
-    showToast("Entre no MFS antes de receber uma sincronização.");
-    return;
-  }
-
-  try {
-    const date = String(payload.date || "");
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) throw new Error("Data inválida recebida do Companion.");
-    const month = date.slice(0, 7);
-    const day = Number(date.slice(-2));
-    const records = await getMonthRecordsOnce(month);
-
-    const rows = [];
-    let ignored = 0;
-    let changed = 0;
-    let same = 0;
-    let schoolsFound = 0;
-
-    for (const incoming of Array.isArray(payload.schools) ? payload.schools : []) {
-      let schoolId = String(incoming.id || "");
-      let meta = state.schools[schoolId];
-      if (!meta) {
-        const match = findSchoolByCSVName(incoming.name || "");
-        if (match) { schoolId = match.id; meta = match.meta; }
-      }
-      if (!schoolId || !meta) { ignored++; continue; }
-      schoolsFound++;
-
-      const current = records[schoolId] || { s: {} };
-      const expected = effectiveShiftsForSchool(schoolId, current);
-      const apiTurns = Array.isArray(incoming.turns) ? incoming.turns : [];
-
-      for (const turn of apiTurns) {
-        const shift = SHIFT_CODES[String(turn.code || "").toUpperCase()];
-        if (!shift) continue;
-        const after = companionStatusFromTurn(turn);
-        const before = statusChar(current, shift, day);
-        const applicable = !hasExpectedRosterV2(meta) || expected.includes(shift);
-        rows.push({ schoolId, schoolName: incoming.name || meta.name || schoolId, shift, before, after, applicable, reason: turn.justificativas ? `${turn.justificativas} justificativa(s)` : "" });
-        if (!applicable) { ignored++; continue; }
-        if (before !== after) changed++; else same++;
-      }
+  const resolveSchool=incoming=>{
+    let schoolId=String(incoming?.id||"");
+    let meta=state.schools[schoolId];
+    if(!meta){const match=findSchoolByName(incoming?.name||"");if(match){schoolId=match.id;meta=match.meta;}}
+    if(!meta&&isAdmin()&&schoolId&&incoming?.name){
+      meta={id:schoolId,name:incoming.name,inep:incoming.inep||"",city:incoming.city||"",area:incoming.area||"",active:true};
     }
-
-    companionSyncPreview = { payload, date, month, day, rows, records, ignored, changed, same, schoolsFound };
-    openSyncModal();
-    const result = $("#syncResult");
-    const preview = $("#companionSyncPreview");
-    const apply = $("#applyCompanionSync");
-    if (result) result.innerHTML = `<strong>🟢 Monitora sincronizado</strong><br>${schoolsFound} escolas reconhecidas · ${changed} alterações · ${same} situações mantidas · ${ignored} ignoradas.`;
-    if (preview) {
-      preview.hidden = false;
-      preview.innerHTML = `
-        <div class="sync-preview-head"><strong>${escapeHtml(formatDateBR(date))}</strong><span>${escapeHtml(payload.schoolCount || schoolsFound)} escolas recebidas</span></div>
-        <div class="sync-preview-grid">
-          <div><strong>${changed}</strong><small>mudam</small></div>
-          <div><strong>${same}</strong><small>mantidas</small></div>
-          <div><strong>${ignored}</strong><small>ignoradas</small></div>
-        </div>
-        <div class="sync-preview-note">A prévia respeita a grade de turnos esperados já calibrada pelo CSV. Turnos que não são esperados não serão gravados como operação atual.</div>
-      `;
-    }
-    if (apply) { apply.hidden = false; apply.disabled = changed === 0; }
-  } catch (error) {
-    console.error("Companion sync:", error);
-    showToast(error.message || "Não foi possível preparar a sincronização.");
-  }
-}
-
-async function applyCompanionSync() {
-  const preview = companionSyncPreview;
-  if (!preview || !preview.rows?.length) return;
-
-  const { date, month, day, rows, records } = preview;
-  const operations = [];
-  const changedBySchool = new Map();
-
-  rows.forEach(row => {
-    if (!row.applicable || row.before === row.after) return;
-    const current = clone(records[row.schoolId] || { s: {} });
-    setStatusChar(current, row.shift, day, row.after, month);
-    changedBySchool.set(row.schoolId, current);
-  });
-
-  changedBySchool.forEach((record, schoolId) => {
-    operations.push(batch => batch.set(
-      doc(db, "months", month, "schools", schoolId),
-      {
-        schoolId,
-        month,
-        s: record.s,
-        source: "monitora-companion",
-        sourceDate: date,
-        updatedAt: serverTimestamp(),
-        updatedBy: state.user.uid
-      },
-      { merge: true }
-    ));
-  });
-
-  if (!operations.length) {
-    showToast("Nenhuma alteração aplicável encontrada.");
-    return;
-  }
-
-  try {
-    await commitWriteOperationsInChunks(operations);
-    await setDoc(doc(db, "months", month), {
-      label: monthLabel(month),
-      updatedAt: serverTimestamp(),
-      updatedBy: state.user.uid,
-      lastSource: "monitora-companion",
-      lastMonitoraSyncDate: date
-    }, { merge: true });
-    await addDoc(collection(db, "imports"), {
-      type: "monitora-companion",
-      date,
-      month,
-      schoolCount: changedBySchool.size,
-      createdAt: serverTimestamp(),
-      createdBy: state.user.uid,
-      createdByEmail: state.user.email || ""
-    });
-
-    companionSyncPreview = null;
-    $("#applyCompanionSync").hidden = true;
-    $("#applyCompanionSync").disabled = true;
-    $("#companionSyncPreview").hidden = true;
-    $("#syncResult").innerHTML = `<strong>🟢 Sincronização aplicada</strong><br>${changedBySchool.size} escolas tiveram alterações gravadas no MFS.`;
-    if (month === state.month) subscribeMonthRecords(month);
-    renderCharges($("#dailyDate")?.value || date);
-    refreshAssistantStatus();
-    showToast("Sincronização do Monitora aplicada ao MFS.");
-  } catch (error) {
-    console.error("Erro ao aplicar Companion Sync:", error);
-    showToast("A sincronização não pôde ser gravada no Firestore.");
-  }
-}
-
-function bindCompanionBridge() {
-  const handlePayload = payload => {
-    if (!payload || payload.source !== "monitora") return;
-    receiveCompanionSync(payload);
+    return{schoolId,meta};
   };
 
-  document.addEventListener("mfs-companion-sync", event => {
-    handlePayload(event.detail);
-  });
+  // Grade operacional atual: só é atualizada quando o período termina hoje.
+  if(payload.updateCurrentShifts!==false){
+    for(const [incomingId,codes] of Object.entries(payload.schoolShifts||{})){
+      const metaIncoming=metadataById.get(String(incomingId));
+      const resolved=resolveSchool(metaIncoming||{id:incomingId,name:payload.schoolNames?.[incomingId]||""});
+      if(!resolved.schoolId||!resolved.meta){ignored.push({schoolId:String(incomingId),reason:"escola não reconhecida"});continue;}
+      const shifts=normalizeShiftList((codes||[]).map(code=>companionShift(code)).filter(Boolean));
+      const base={
+        expectedShifts:shifts,
+        expectedShiftsUpdatedAt:serverTimestamp(),
+        expectedShiftsUpdatedBy:state.user.uid,
+        expectedShiftSource:"companion",
+        expectedShiftSyncAt:serverTimestamp()
+      };
+      if(isAdmin()){
+        const source=metaIncoming||resolved.meta;
+        Object.assign(base,{active:resolved.meta.active!==false,name:source.name||resolved.meta.name||"",inep:source.inep||resolved.meta.inep||"",city:source.city||resolved.meta.city||"",area:source.area||resolved.meta.area||"",empresa:source.empresa||resolved.meta.empresa||"",empresaId:source.empresaId??resolved.meta.empresaId??null});
+      }
+      schoolOps.push(batch=>batch.set(doc(db,"schools",resolved.schoolId),base,{merge:true}));
+      if(isAdmin()&&metaIncoming?.director?.name){profileOps.push(batch=>batch.set(doc(db,"schoolProfiles",resolved.schoolId),{schoolId:resolved.schoolId,directorName:metaIncoming.director.name,directorPhone:metaIncoming.director.phone||"",updatedAt:serverTimestamp(),updatedBy:state.user.uid},{merge:true}));}
+    }
+  }
 
-  window.addEventListener("message", event => {
-    if (event.origin !== window.location.origin) return;
-    const data = event.data;
-    if (!data || data.source !== "mfs-companion" || data.type !== "SYNC_DATA") return;
-    handlePayload(data.payload);
-  });
-}
+  for(const dayPayload of Array.isArray(payload.days)?payload.days:[]){
+    const date=String(dayPayload.date||"");if(!/^\d{4}-\d{2}-\d{2}$/.test(date)||!date.startsWith(month))continue;
+    const day=Number(date.slice(-2));
+    for(const incoming of Array.isArray(dayPayload.schools)?dayPayload.schools:[]){
+      const {schoolId,meta}=resolveSchool(incoming);
+      if(!schoolId||!meta){ignored.push({schoolId:String(incoming?.id||""),schoolName:incoming?.name||"",date,reason:"escola não reconhecida"});continue;}
+      const current=working[schoolId]||(working[schoolId]={schoolId,month,s:{},r:{},n:{}});
+      const incomingTurns=Array.isArray(incoming.turns)?incoming.turns:[];
+      const incomingShiftSet=new Set(incomingTurns.map(turn=>companionShift(turn.code)).filter(Boolean));
+      // Como o Companion é a fonte principal, registros antigos de turnos que a API não
+      // devolveu para este dia deixam de valer. Mantemos apenas X (não letivo) explícito.
+      for(const staleShift of SHIFT_ORDER){
+        if(incomingShiftSet.has(staleShift))continue;
+        const staleBefore=statusChar(current,staleShift,day);
+        if(!["G","R","J"].includes(staleBefore))continue;
+        setStatusChar(current,staleShift,day,".",month);
+        if(current.r?.[String(day)]?.[staleShift]){
+          delete current.r[String(day)][staleShift];
+          if(!Object.keys(current.r[String(day)]).length)delete current.r[String(day)];
+        }
+        changes.push({date,month,schoolId,schoolName:incoming.name||meta.name||schoolId,shift:staleShift,before:staleBefore,after:".",reason:"turno ausente na fonte Companion"});
+        touchedSchools.add(schoolId);
+      }
+      for(const turn of incomingTurns){
+        const shift=companionShift(turn.code);if(!shift)continue;
+        let after=companionStatusFromTurn(turn);const before=statusChar(current,shift,day);
+        if(before==="X"&&after==="R")after="X";
+        if(before===after)continue;
+        setStatusChar(current,shift,day,after,month);
+        current.r||={};
+        if(after==="J"){
+          current.r[String(day)]||={};
+          current.r[String(day)][shift]=safeReason(turn.justificativa)||`${Number(turn.justificativas||0)} justificativa(s)`;
+        }else if(current.r?.[String(day)]?.[shift]){
+          delete current.r[String(day)][shift];if(!Object.keys(current.r[String(day)]).length)delete current.r[String(day)];
+        }
+        changes.push({date,month,schoolId,schoolName:incoming.name||meta.name||schoolId,shift,before,after,reason:after==="J"?(current.r?.[String(day)]?.[shift]||""):""});
+        touchedSchools.add(schoolId);
+      }
+    }
+  }
 
-function openSyncModal(){
-  $("#syncMonitoraModal")?.classList.add("open");
+  const recordOps=[];
+  touchedSchools.forEach(schoolId=>{const record=working[schoolId];recordOps.push(batch=>batch.set(doc(db,"months",month,"schools",schoolId),{schoolId,month,s:record.s||{},r:record.r||{},n:record.n||{},source:"monitora-companion",sourceRange:`${payload.rangeStart||""}|${payload.rangeEnd||""}`,updatedAt:serverTimestamp(),updatedBy:state.user.uid},{merge:true}));});
+
+  // Em três fases para que as regras do Firestore vejam escolas novas antes de perfis/registros.
+  if(schoolOps.length)await commitWriteOperationsInChunks(schoolOps);
+  if(profileOps.length)await commitWriteOperationsInChunks(profileOps);
+  if(recordOps.length)await commitWriteOperationsInChunks(recordOps);
+
+  await setDoc(doc(db,"months",month),{label:monthLabel(month),lastSource:"monitora-companion",lastCompanionSyncAt:serverTimestamp(),lastCompanionRange:`${formatDateBR(payload.rangeStart||"")} → ${formatDateBR(payload.rangeEnd||"")}`,updatedAt:serverTimestamp(),updatedBy:state.user.uid},{merge:true});
+
+  const parts=[];const size=220;if(!changes.length)parts.push([]);else for(let i=0;i<changes.length;i+=size)parts.push(changes.slice(i,i+size));
+  for(let i=0;i<parts.length;i++){
+    const docId=`${payload.runId||Date.now()}_${month}_${String(i+1).padStart(2,"0")}`;
+    await setDoc(doc(db,"syncRuns",docId),{
+      runId:payload.runId||docId,month,part:i+1,parts:parts.length,rangeStart:payload.rangeStart||"",rangeEnd:payload.rangeEnd||"",mode:payload.mode||"manual",source:"monitora-companion",schoolCount:Number(payload.schoolCount||0),changeCount:changes.length,ignoredCount:ignored.length,changes:parts[i],createdAt:serverTimestamp(),createdBy:state.user.uid,createdByEmail:state.user.email||""
+    },{merge:true});
+  }
+  renderIncomingSyncDetails(changes,payload);
+  if(month===state.month)subscribeMonthRecords(month);
+  if($("#opsDate")?.value?.startsWith(month))renderOpsCenter();
+  refreshAssistantStatus();
+  showToast(`${monthLabel(month)}: ${changes.length} alteração(ões) sincronizada(s).`);
 }
-function closeSyncModal(){
-  $("#syncMonitoraModal")?.classList.remove("open");
+async function receiveCompanionSync(payload){
+  const key=`${payload?.runId||"run"}|${payload?.chunkMonth||payload?.rangeEnd||"month"}|${payload?.chunkIndex||1}`;
+  if(companionProcessedChunks.has(key))return;
+  companionProcessedChunks.set(key,"pending");
+  companionApplyChain=companionApplyChain.catch(()=>{}).then(()=>applyCompanionChunk(payload));
+  try{
+    await companionApplyChain;
+    companionProcessedChunks.set(key,Date.now());
+    if(companionProcessedChunks.size>80){
+      const done=[...companionProcessedChunks.entries()].filter(([,value])=>typeof value==="number").sort((a,b)=>a[1]-b[1]);
+      done.slice(0,Math.max(0,done.length-50)).forEach(([oldKey])=>companionProcessedChunks.delete(oldKey));
+    }
+  }catch(error){
+    companionProcessedChunks.delete(key);
+    console.error("Companion sync:",error);
+    showToast(error.message||"Falha ao aplicar sincronização do Companion.");
+  }
 }
+function bindCompanionBridge(){const handlePayload=payload=>{if(payload?.source==="monitora")receiveCompanionSync(payload);};document.addEventListener("mfs-companion-sync",event=>handlePayload(event.detail));window.addEventListener("message",event=>{if(event.origin!==window.location.origin)return;const data=event.data;if(data?.source==="mfs-companion"&&data.type==="SYNC_DATA")handlePayload(data.payload);});}
+function openSyncModal(){$("#syncMonitoraModal")?.classList.add("open");}
+function closeSyncModal(){$("#syncMonitoraModal")?.classList.remove("open");}
 
 function bindEvents() {
   $("#syncMonitoraButton")?.addEventListener("click",openSyncModal);
   $("#closeSyncModal")?.addEventListener("click",closeSyncModal);
   $("#cancelSync")?.addEventListener("click",closeSyncModal);
-  $("#runSync")?.addEventListener("click",runMonitoraSyncTest);
-  $("#applyCompanionSync")?.addEventListener("click",applyCompanionSync);
   $("#googleLoginButton")?.addEventListener("click",async()=>{
     try { const provider=new GoogleAuthProvider(); provider.setCustomParameters({prompt:"select_account"}); await signInWithPopup(auth,provider); }
     catch(error){console.error(error);showToast("Não foi possível entrar com Google.");}
@@ -2631,32 +1705,14 @@ function bindEvents() {
   $("#editorStatus")?.addEventListener("change",updateEditorHint);
   $("#saveEditor")?.addEventListener("click",saveStatusEditor);
 
-  const monitoraInput=$("#monitoraInput");
-  monitoraInput?.addEventListener("change",()=>processFile(monitoraInput.files?.[0]));
-  $("#applyImport")?.addEventListener("click",applyImport);
-  $("#clearImport")?.addEventListener("click",()=>clearImport(true));
-  const dropZone=$("#dropZone");
-  ["dragenter","dragover"].forEach(name=>dropZone?.addEventListener(name,event=>{event.preventDefault();dropZone.classList.add("drag");}));
-  ["dragleave","drop"].forEach(name=>dropZone?.addEventListener(name,event=>{event.preventDefault();dropZone.classList.remove("drag");}));
-  dropZone?.addEventListener("drop",event=>{const file=event.dataTransfer.files?.[0];if(file)processFile(file);});
-
-  const csvInput=$("#dailyCsvInput");
-  csvInput?.addEventListener("change",()=>processDailyFile(csvInput.files?.[0]));
-  $("#applyDaily")?.addEventListener("click",applyDailyCSV);
-  $("#clearDaily")?.addEventListener("click",()=>clearDaily(true));
-  $("#dailyDate")?.addEventListener("change",event=>renderCharges(event.target.value));
-  $("#dailyShift")?.addEventListener("change",()=>{if(state.dailyPreview){state.dailyPreview=null;$("#applyDaily").disabled=true;}});
-  $("#copyAllCharges")?.addEventListener("click",copyAllCharges);
-  $$('[data-charge-view]').forEach(button=>button.addEventListener("click",()=>{
-    state.chargeView=button.dataset.chargeView;
-    sessionStorage.setItem("mfs-charge-view",state.chargeView);
-    renderCharges($("#dailyDate")?.value);
-  }));
-  const csvDrop=$("#csvDropZone");
-  ["dragenter","dragover"].forEach(name=>csvDrop?.addEventListener(name,event=>{event.preventDefault();csvDrop.classList.add("drag");}));
-  ["dragleave","drop"].forEach(name=>csvDrop?.addEventListener(name,event=>{event.preventDefault();csvDrop.classList.remove("drag");}));
-  csvDrop?.addEventListener("drop",event=>{const file=event.dataTransfer.files?.[0];if(file)processDailyFile(file);});
-
+  $("#opsDate")?.addEventListener("change",event=>{state.opsDate=event.target.value;renderOpsCenter();});
+  $("#opsShift")?.addEventListener("change",event=>{state.opsShift=event.target.value;renderOpsCenter();});
+  $("#refreshOps")?.addEventListener("click",renderOpsCenter);
+  $("#opsSyncButton")?.addEventListener("click",openSyncModal);
+  $("#copyAllOpsCharges")?.addEventListener("click",copyAllOpsCharges);
+  $("#openOpsFromSync")?.addEventListener("click",()=>{closeSyncModal();switchView("ops");});
+  $$('[data-ops-charge-view]').forEach(button=>button.addEventListener("click",()=>{state.opsChargeView=button.dataset.opsChargeView;sessionStorage.setItem("mfs-ops-charge-view",state.opsChargeView);renderOpsCenter();}));
+  $("#view-ops")?.addEventListener("click",event=>{const charge=event.target.closest("[data-ops-charge-index]");if(charge){const group=state.opsChargeGroups[Number(charge.dataset.opsChargeIndex)];if(group)copyText(chargeMessage(group,$("#opsDate").value));return;}const schoolCharge=event.target.closest("[data-ops-charge-school]");if(schoolCharge){const group=state.opsChargeGroups.find(g=>g.id===schoolCharge.dataset.opsChargeSchool);if(group)copyText(chargeMessage(group,$("#opsDate").value));return;}const profile=event.target.closest("[data-school-profile]");if(profile)openSchoolProfile(profile.dataset.schoolProfile);});
 
   $("#assistantTopButton")?.addEventListener("click",()=>switchView("assistant"));
   $("#refreshAssistantButton")?.addEventListener("click",refreshAssistantStatus);
